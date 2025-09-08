@@ -1,0 +1,69 @@
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    container_name: scheduler-app-dev
+    ports:
+      - "8080:8080"
+    volumes:
+      # Mount local source code into the container for hot-reloading
+      - .:/app
+    environment:
+      - REDIS_URL=${REDIS_ADDR}
+      - DATABASE_URL=postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@{POSTGRES_HOST}:{POSTGRES_PORT}/${POSTGRES_DB}
+      - TZ=${TZ:-UTC}
+    depends_on:
+      - postgresql
+      - redis
+
+  postgresql:
+    image: postgres:13-alpine
+    environment:
+      - POSTGRES_HOST=${POSTGRES_HOST}
+      - POSTGRES_PORT=${POSTGRES_PORT}
+      - POSTGRES_USER=${POSTGRES_USER}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - POSTGRES_DB=${POSTGRES_DB}
+      - TZ=${TZ:-UTC}
+    volumes:
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql
+      - postgres-data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+
+  redis:
+    image: redis:6-alpine
+    environment:
+      - TZ=${TZ:-UTC}
+    ports:
+      - "6379:6379"
+
+  pgadmin:
+    image: dpage/pgadmin4:latest
+    container_name: pgadmin-dev
+    environment:
+      - PGADMIN_DEFAULT_EMAIL=admin@example.com
+      - PGADMIN_DEFAULT_PASSWORD=admin
+      - TZ=${TZ:-UTC}
+    ports:
+      - "5050:80"
+    depends_on:
+      - postgresql
+    volumes:
+      - pgadmin-data:/var/lib/pgadmin
+
+  redisinsight:
+    image: redislabs/redisinsight:latest
+    container_name: redisinsight-dev
+    environment:
+      - TZ=${TZ:-UTC}
+    ports:
+      - "8001:8001"
+    volumes:
+      - redisinsight-data:/db
+
+volumes:
+  postgres-data:
+  pgadmin-data:
+  redisinsight-data:

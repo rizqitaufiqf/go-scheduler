@@ -1,0 +1,22 @@
+# Use the full Go image because we need the compiler and tooling
+FROM golang:1.24.1-alpine
+
+WORKDIR /app
+
+# Install air for live-reloading
+RUN go install github.com/air-verse/air@latest
+
+# Install swag for generating swagger docs
+RUN go install github.com/swaggo/swag/cmd/swag@latest
+ 
+# Copy module files and download dependencies
+COPY go.mod go.sum ./
+RUN go mod download
+
+# Copy the rest of the source code
+COPY . .
+
+# The command to start the app using air's live-reloading
+ENV GOPATH /go
+ENV PATH $GOPATH/bin:/usr/local/go/bin:$PATH
+CMD ["air", "-c", ".air.toml"]

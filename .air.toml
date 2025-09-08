@@ -1,0 +1,23 @@
+# .air.toml
+# Config file for air: https://github.com/air-verse/air
+
+root = "."
+tmp_dir = "tmp"
+
+[build]
+# Command to build the binary.
+cmd = "go build -o ./tmp/app ./main.go"
+# The path to the binary to run.
+bin = "./tmp/app"
+# Watch these file extensions.
+include_ext = ["go", "toml", "yml"]
+# Ignore these directories.
+exclude_dir = ["tmp", "vendor"]
+
+[log]
+# Show log time.
+time = true
+
+[misc]
+# Delete tmp directory on exit.
+clean_on_exit = true
