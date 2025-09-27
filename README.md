@@ -6,16 +6,20 @@ A robust, distributed task scheduler and worker system built with Go. This appli
 
 ## Overview
 
-The primary use case demonstrated is scheduling CRUD operations for a `Product` entity. Tasks are submitted via an API, stored in a PostgreSQL database, and queued in Redis. A worker process polls Redis for due tasks, processes them, and updates their status in the database.
+The system allows for scheduling background tasks through a RESTful API. Tasks are defined by an **Entity** (e.g., `PRODUCT`) and an **Action** (e.g., `CREATE`), providing a flexible and extensible model. Scheduled tasks are stored in a PostgreSQL database for durability and queued in Redis for efficient processing by a distributed worker system.
 
 ## Features
 
 - **RESTful API**: Schedule and manage tasks using a clean HTTP interface built with Gin.
+- **Normalized Task Model**: Tasks are defined by `Entities` and `Actions` stored in the database, preventing magic strings and allowing for easy extension.
 - **Background Worker**: A concurrent worker processes tasks from a queue, with configurable concurrency.
 - **Distributed Locking**: Uses Redis `SETNX` to ensure that a task is processed by only one worker instance at a time, making it safe to scale horizontally.
+- **Automatic Retries**: Failed tasks are automatically retried with exponential backoff, up to a configurable maximum number of attempts.
+- **Task Prioritization**: Assign priorities to tasks to ensure high-priority jobs are processed first.
 - **Resilient**: On startup, the worker reconciles tasks that may have been stuck in a `processing` state due to a previous crash, ensuring no tasks are lost.
 - **Configurable**: Worker behavior (concurrency, polling interval) can be configured via environment variables.
 - **Database-backed**: Tasks are persisted in PostgreSQL for durability and querying.
+- **Granular Statuses**: Tasks have a clear lifecycle with statuses like `pending`, `processing`, `completed`, `failed`, `paused`, and `canceled`.
 - **API Documentation**: Interactive API documentation is available via Swagger (OpenAPI).
 - **Containerized**: The entire application stack (app, database, Redis) is managed with Docker Compose for easy setup and deployment.
 
@@ -106,12 +110,14 @@ SCHEDULED_AT=$(date -d "+2 minutes" -u +"%Y-%m-%dT%H:%M:%SZ")
 curl -X POST http://localhost:8080/scheduler/products/create \
 -H "Content-Type: application/json" \
 -d '{
-  "scheduled_at": "'"$SCHEDULED_AT"'",
-  "payload": {
-    "name": "New Awesome Gadget",
-    "price": 199.99,
-    "stock": 50
-  }
+    "scheduled_at": "'"$SCHEDULED_AT"'",
+    "priority": 10,
+    "max_retries": 5,
+    "payload": {
+        "name": "New Awesome Gadget",
+        "price": 199.99,
+        "stock": 50
+    }
 }'
 ```
 

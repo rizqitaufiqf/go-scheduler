@@ -27,7 +27,7 @@ services:
       - POSTGRES_DB=${POSTGRES_DB}
       - TZ=${TZ:-UTC}
     volumes:
-      - ./init.sql:/docker-entrypoint-initdb.d/init.sql
+      - ./sql/init.sql:/docker-entrypoint-initdb.d/init.sql
       - postgres-data:/var/lib/postgresql/data
     ports:
       - "5432:5432"
@@ -39,29 +39,29 @@ services:
     ports:
       - "6379:6379"
 
-  pgadmin:
-    image: dpage/pgadmin4:latest
-    container_name: pgadmin-dev
-    environment:
-      - PGADMIN_DEFAULT_EMAIL=admin@example.com
-      - PGADMIN_DEFAULT_PASSWORD=admin
-      - TZ=${TZ:-UTC}
-    ports:
-      - "5050:80"
-    depends_on:
-      - postgresql
-    volumes:
-      - pgadmin-data:/var/lib/pgadmin
+  # pgadmin:
+  #   image: dpage/pgadmin4:latest
+  #   container_name: pgadmin-dev
+  #   environment:
+  #     - PGADMIN_DEFAULT_EMAIL=admin@example.com
+  #     - PGADMIN_DEFAULT_PASSWORD=admin
+  #     - TZ=${TZ:-UTC}
+  #   ports:
+  #     - "5050:80"
+  #   depends_on:
+  #     - postgresql
+  #   volumes:
+  #     - pgadmin-data:/var/lib/pgadmin
 
-  redisinsight:
-    image: redislabs/redisinsight:latest
-    container_name: redisinsight-dev
-    environment:
-      - TZ=${TZ:-UTC}
-    ports:
-      - "8001:8001"
-    volumes:
-      - redisinsight-data:/db
+  # redisinsight:
+  #   image: redislabs/redisinsight:latest
+  #   container_name: redisinsight-dev
+  #   environment:
+  #     - TZ=${TZ:-UTC}
+  #   ports:
+  #     - "8001:8001"
+  #   volumes:
+  #     - redisinsight-data:/db
 
 volumes:
   postgres-data:

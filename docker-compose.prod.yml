@@ -24,7 +24,7 @@ services:
       - POSTGRES_DB=${POSTGRES_DB}
       - TZ=${TZ:-UTC}
     volumes:
-      - ./init.sql:/docker-entrypoint-initdb.d/init.sql
+      - ./sql/init.sql:/docker-entrypoint-initdb.d/init.sql
       - postgres-data:/var/lib/postgresql/data
     # In a real production setup, you might not expose the DB port publicly
     # ports:

@@ -11,7 +11,7 @@ help: ## ✨ Show this help message
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-20s\033[0m %s\n", $$1, $$2}'
 
 swag: ## 📚 Generate Swagger Documentations
-	docker exec -it scheduler-app-dev swag init
+	docker exec -it scheduler-app-dev swag init --parseDependency --parseInternal
 
 # --- Development Commands ---
 build-dev: ## 📦 Build the development environment

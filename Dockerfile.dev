@@ -17,6 +17,6 @@ RUN go mod download
 COPY . .
 
 # The command to start the app using air's live-reloading
-ENV GOPATH /go
-ENV PATH $GOPATH/bin:/usr/local/go/bin:$PATH
+ENV GOPATH=/go
+ENV PATH=$GOPATH/bin:/usr/local/go/bin:$PATH
 CMD ["air", "-c", ".air.toml"]
