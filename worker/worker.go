@@ -68,7 +68,7 @@ func (w *Worker) reconcileTasks() {
 	var tasksToReconcile []dto.TaskScheduler
 	// 1. Find all tasks that were stuck in 'processing' OR are 'pending' and past their scheduled time.
 	// This covers both crashed workers and tasks that might have been missed if Redis lost data.
-	statuses := []dto.TaskStatus{dto.StatusProcessing, dto.StatusPending}
+	statuses := []dto.TaskStatus{dto.StatusProcessing, dto.StatusPending, dto.StatusRetrying}
 	if err := w.db.WithContext(w.ctx).
 		Where("status IN ?", statuses).
 		Find(&tasksToReconcile).Error; err != nil {
@@ -81,7 +81,8 @@ func (w *Worker) reconcileTasks() {
 		return
 	}
 
-	log.Printf("Found %d tasks to reconcile. Re-queuing in Redis and ensuring status is 'pending'...", len(tasksToReconcile))
+	log.Printf("Found %d tasks to reconcile. Re-queuing in Redis and updating status...", len(tasksToReconcile))
+	var idsToSetPending []uuid.UUID
 	for _, task := range tasksToReconcile {
 		// 2. Re-add the task to the Redis sorted set.
 		// The worker will pick it up based on its original scheduled_at time.
@@ -89,12 +90,20 @@ func (w *Worker) reconcileTasks() {
 			Score:  float64(task.ScheduledAt.Unix()),
 			Member: task.ID.String(),
 		})
+
+		// Only change status if it was 'processing'. 'pending' and 'retrying' are already valid queueable states.
+		if task.Status == dto.StatusProcessing {
+			idsToSetPending = append(idsToSetPending, task.ID)
+		}
 	}
 
-	// 3. Bulk update the status of all reconciled tasks back to 'pending' in the database.
-	if err := w.db.WithContext(w.ctx).Model(&dto.TaskScheduler{}).Where("id IN ?", getTaskIDs(tasksToReconcile)).Update("status", dto.StatusPending).Error; err != nil {
-		log.Printf("Error updating status for reconciled tasks: %v", err)
-		return
+	// 3. Bulk update the status of all tasks that were stuck in 'processing' back to 'pending'.
+	// We leave 'retrying' tasks as they are.
+	if len(idsToSetPending) > 0 {
+		if err := w.db.WithContext(w.ctx).Model(&dto.TaskScheduler{}).Where("id IN ?", idsToSetPending).Update("status", dto.StatusPending).Error; err != nil {
+			log.Printf("Error updating status for reconciled tasks: %v", err)
+			return
+		}
 	}
 
 	log.Println("Reconciliation complete.")
@@ -118,95 +127,137 @@ func (w *Worker) processDueTasks() {
 	for _, taskIDStr := range taskIDs {
 		log.Println("Processing task:", taskIDStr)
 		w.sem <- struct{}{} // Acquire a token
-		go func(id string) {
+		go func(id string, attempt int) {
 			defer func() { <-w.sem }() // Release token
-			w.executeTask(id)
-		}(taskIDStr)
+			w.executeTask(id, attempt)
+		}(taskIDStr, 1) // First attempt is always 1
 	}
 }
 
-func (w *Worker) executeTask(taskIDStr string) {
+func (w *Worker) executeTask(taskIDStr string, attempt int) {
 	lockKey := repo.TaskLockKey(taskIDStr)
-	// Try to acquire a distributed lock for this task.
-	// This prevents multiple workers from processing the same task.
+
+	// 1) Acquire Redis lock fast to avoid thundering herd
 	locked, err := w.redis.SetNX(w.ctx, lockKey, "processing", lockTTL).Result()
-	if err != nil || !locked {
-		// Could not acquire lock, another worker is on it.
+	if err != nil {
+		log.Printf("Redis SetNX error for %s: %v", taskIDStr, err)
 		return
 	}
-	defer w.redis.Del(w.ctx, lockKey)
+	if !locked {
+		// someone else is processing
+		return
+	}
+	// always attempt to delete lock; if you need refresh logic for long jobs, implement it
+	defer func() {
+		if _, err := w.redis.Del(w.ctx, lockKey).Result(); err != nil {
+			log.Printf("Warning: failed to delete lock %s: %v", lockKey, err)
+		}
+	}()
 
-	// Now that we have the lock, we can safely remove the task from the queue.
-	// This prevents other workers or other poll cycles from trying to process this same task.
-	w.redis.ZRem(w.ctx, repo.TasksQueueKey(), taskIDStr)
-
+	// parse ID
 	taskID, err := uuid.Parse(taskIDStr)
 	if err != nil {
-		log.Printf("Invalid task ID format '%s': %v", taskIDStr, err)
+		log.Printf("Invalid task ID '%s': %v", taskIDStr, err)
 		return
 	}
 
-	var task dto.TaskScheduler
+	// 2) Start DB tx and lock row FOR UPDATE to prevent concurrent DB updates
 	tx := w.db.WithContext(w.ctx).Begin()
-
-	// Find a pending task and lock it for update.
-	// Preload entity and action names for the processor key.
-	if err := tx.Clauses(clause.Locking{Strength: "SHARE"}).
+	var task dto.TaskScheduler
+	if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
 		Preload("TaskEntity").
 		Preload("TaskAction").
-		Where("id = ? AND status = ?", taskID, dto.StatusPending).
+		Where("id = ?", taskID).
 		First(&task).Error; err != nil {
 		tx.Rollback()
-		if err == gorm.ErrRecordNotFound {
-			// Task already processed or deleted, which is fine.
-		} else {
-			log.Printf("Error finding task %s: %v", taskID, err)
+		if err != gorm.ErrRecordNotFound {
+			log.Printf("Error selecting task %s: %v", taskID, err)
 		}
 		return
 	}
 
-	// Mark task as processing
+	// 3) Check preconditions (DB is source of truth)
+	if task.DeletedAt.Valid {
+		tx.Rollback()
+		// task deleted -> nothing to do
+		return
+	}
+	// If not in a runnable state (pending or retrying), skip.
+	if task.Status != dto.StatusPending && task.Status != dto.StatusRetrying {
+		tx.Rollback()
+		// If you removed from Redis earlier, prefer enqueuer to re-add;
+		// do NOT re-add automatically here to avoid races with admin actions.
+		return
+	}
+
+	// 4) Remove from Redis queue AFTER verifying DB (we hold Redis lock)
+	if _, err := w.redis.ZRem(w.ctx, repo.TasksQueueKey(), taskIDStr).Result(); err != nil {
+		// Log, but continue — DB authoritative
+		log.Printf("Warning: ZREM failed for %s: %v", taskIDStr, err)
+	}
+
+	// 5) Mark as processing; persist BEFORE actual processing
 	task.Status = dto.StatusProcessing
-	task.RetryCount++ // Increment retry count for this attempt
 	if err := tx.Save(&task).Error; err != nil {
 		tx.Rollback()
-		log.Printf("Error marking task %s as processing: %v", task.ID, err)
+		log.Printf("Error marking task %s processing: %v", task.ID, err)
 		return
 	}
-	tx.Commit()
+	if err := tx.Commit().Error; err != nil {
+		log.Printf("Error committing tx for task %s processing: %v", task.ID, err)
+		return
+	}
 
-	log.Printf("Processing task %s (%s:%s), attempt %d/%d", task.ID, task.TaskEntity.Name, task.TaskAction.Name, task.RetryCount, task.MaxRetries)
+	log.Printf("Processing task %s (%s:%s), attempt %d/%d", task.ID, task.TaskEntity.Name, task.TaskAction.Name, attempt, task.MaxRetries)
 
-	// Process the task
-	err = w.process(&task)
+	time.Sleep(10 * time.Second)
+	// 6) Execute processing outside transaction (so long-running tasks don't block DB)
+	procErr := w.process(&task)
 
-	// Update task status based on processing outcome
-	if err != nil {
-		task.Result = err.Error()
-		if task.RetryCount >= task.MaxRetries {
+	// 7) Outcome handling — update DB and requeue if needed
+	if procErr != nil {
+		task.Result = procErr.Error()
+		if attempt >= task.MaxRetries {
 			task.Status = dto.StatusFailed
-			log.Printf("Task %s failed after %d attempts: %v", task.ID, task.MaxRetries, err)
-		} else {
-			// Re-schedule for retry with exponential backoff
-			task.Status = dto.StatusPending
-			backoffDuration := time.Duration(task.RetryCount*10) * time.Second
-			task.ScheduledAt = time.Now().Add(backoffDuration)
-			log.Printf("Task %s failed, will retry in %v. Error: %v", task.ID, backoffDuration, err)
-			// Re-add to Redis queue for retry
-			w.redis.ZAdd(w.ctx, repo.TasksQueueKey(), &redis.Z{
-				Score:  float64(task.ScheduledAt.Unix()),
-				Member: task.ID.String(),
-			})
+			if err := w.db.WithContext(w.ctx).Save(&task).Error; err != nil {
+				log.Printf("Error saving failed task %s: %v", task.ID, err)
+			}
+			log.Printf("Task %s failed permanently after %d attempts: %v", task.ID, attempt, procErr)
+			return
 		}
-	} else {
-		task.Status = dto.StatusCompleted
-		task.Result = "Success"
-		log.Printf("Task %s completed successfully", task.ID)
+
+		// schedule retry with backoff; persist BEFORE pushing to Redis
+		backoffDuration := time.Duration(attempt*10) * time.Second
+		task.ScheduledAt = time.Now().Add(backoffDuration)
+		task.Status = dto.StatusRetrying
+
+		if err := w.db.WithContext(w.ctx).Save(&task).Error; err != nil {
+			log.Printf("Error saving retry schedule for task %s: %v", task.ID, err)
+			return
+		}
+
+		// Re-queue the task for the next attempt.
+		// We do this by spawning a new goroutine that will execute the task again
+		// after the backoff duration. This avoids re-adding to Redis and keeps the
+		// retry logic self-contained within the worker process that holds the lock.
+		go func(id string, nextAttempt int) {
+			time.Sleep(backoffDuration)
+			// We don't release the semaphore here, as this goroutine is a continuation of the parent.
+			// The lock is also still held.
+			w.executeTask(id, nextAttempt)
+		}(taskIDStr, attempt+1)
+		log.Printf("Task %s failed, scheduled retry in %v. Error: %v", task.ID, backoffDuration, procErr)
+		return
 	}
 
+	// success
+	task.Status = dto.StatusCompleted
+	task.Result = "Success"
 	if err := w.db.WithContext(w.ctx).Save(&task).Error; err != nil {
-		log.Printf("Error updating final task status for %s: %v", task.ID, err)
+		log.Printf("Error saving completed status for task %s: %v", task.ID, err)
+		return
 	}
+	log.Printf("Task %s completed successfully", task.ID)
 }
 
 // getTaskIDs is a helper function to extract IDs from a slice of tasks.

@@ -53,7 +53,6 @@ CREATE TABLE IF NOT EXISTS public.task_schedulers (
     payload JSONB NOT NULL,
     scheduled_at TIMESTAMPTZ NOT NULL,
     priority INT NOT NULL DEFAULT 0,
-    retry_count INT NOT NULL DEFAULT 0,
     max_retries INT NOT NULL DEFAULT 3,
     status VARCHAR(20) NOT NULL DEFAULT 'pending',
     result TEXT,
@@ -68,7 +67,7 @@ CREATE TABLE IF NOT EXISTS public.task_schedulers (
 -- ======================================
 -- 4) Constraints & Triggers
 -- ======================================
-ALTER TABLE public.task_schedulers ADD CONSTRAINT chk_task_schedulers_status CHECK (status IN ('pending', 'processing', 'completed', 'failed', 'canceled', 'paused'));
+ALTER TABLE public.task_schedulers ADD CONSTRAINT chk_task_schedulers_status CHECK (status IN ('pending', 'processing', 'completed', 'failed', 'canceled', 'paused', 'retrying'));
 
 CREATE TRIGGER trg_set_updated_at_entities BEFORE UPDATE ON public.task_entities FOR EACH ROW EXECUTE FUNCTION public.update_updated_at_column();
 CREATE TRIGGER trg_set_updated_at_actions BEFORE UPDATE ON public.task_actions FOR EACH ROW EXECUTE FUNCTION public.update_updated_at_column();
@@ -112,7 +111,7 @@ SELECT
     (SELECT id FROM public.task_entities WHERE name = 'PRODUCT'),
     (SELECT id FROM public.task_actions WHERE name = 'CREATE'),
     '{"name": "A Pending Product", "price": 99.99, "stock": 10}',
-    NOW() + INTERVAL '5 minutes'
+    NOW() + INTERVAL '2 minutes'
 WHERE
     EXISTS (SELECT 1 FROM public.task_entities WHERE name = 'PRODUCT') AND
     EXISTS (SELECT 1 FROM public.task_actions WHERE name = 'CREATE');
@@ -122,8 +121,8 @@ INSERT INTO public.task_schedulers (task_entity_id, task_action_id, payload, sch
 SELECT
     (SELECT id FROM public.task_entities WHERE name = 'PRODUCT'),
     (SELECT id FROM public.task_actions WHERE name = 'UPDATE'),
-    '{"id": "some-product-id", "name": "A Paused Update Task", "price": 150.00}',
-    NOW() + INTERVAL '10 minutes',
+    jsonb_build_object('id', uuid_generate_v4(), 'name', 'A Paused Update Task', 'price', 150.00),
+    NOW() + INTERVAL '4 minutes',
     'paused'
 WHERE
     EXISTS (SELECT 1 FROM public.task_entities WHERE name = 'PRODUCT') AND

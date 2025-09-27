@@ -16,6 +16,7 @@ const (
 	StatusPending    TaskStatus = "pending"
 	StatusPaused     TaskStatus = "paused"
 	StatusProcessing TaskStatus = "processing"
+	StatusRetrying   TaskStatus = "retrying"
 	StatusCompleted  TaskStatus = "completed"
 	StatusFailed     TaskStatus = "failed"
 	StatusCanceled   TaskStatus = "canceled"
@@ -41,7 +42,6 @@ type TaskScheduler struct {
 	Payload      datatypes.JSON `gorm:"not null" json:"payload" swaggertype:"object"`
 	ScheduledAt  time.Time      `gorm:"not null" json:"scheduled_at"`
 	Priority     int            `gorm:"not null;default:0" json:"priority"`
-	RetryCount   int            `gorm:"not null;default:0" json:"retry_count"`
 	MaxRetries   int            `gorm:"not null;default:3" json:"max_retries"`
 	Status       TaskStatus     `gorm:"type:varchar(20);not null;default:pending" json:"status" example:"pending"`
 	Result       string         `gorm:"type:text" json:"result,omitempty"`
@@ -110,7 +110,6 @@ type TaskResponse struct {
 	Payload        datatypes.JSON `json:"payload"`
 	ScheduledAt    time.Time      `json:"scheduled_at"`
 	Priority       int            `json:"priority"`
-	RetryCount     int            `json:"retry_count"`
 	MaxRetries     int            `json:"max_retries"`
 	Status         TaskStatus     `json:"status"`
 	Result         string         `gorm:"type:text" json:"result,omitempty" example:"Success"`

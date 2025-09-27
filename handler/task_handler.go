@@ -130,7 +130,7 @@ func (h *TaskHandler) ScheduleDeleteProduct(c *gin.Context) {
 // @Tags         Scheduler
 // @Produce      json
 // @Param        status  query     string  false  "Filter tasks by status"  Enums(pending, processing, completed, failed, canceled, paused)
-// @Success      200     {array}   dto.TaskScheduler
+// @Success      200     {array}   dto.TaskResponse
 // @Failure      400     {object}  dto.ErrorResponse
 // @Failure      500     {object}  dto.ErrorResponse
 // @Router       /scheduler/tasks [get]
@@ -161,8 +161,8 @@ func (h *TaskHandler) GetTasks(c *gin.Context) {
 // @Description  Pauses a 'pending' task, preventing it from being executed.
 // @Tags         Scheduler
 // @Produce      json
-// @Param        id   path      string  true  "Task ID (UUID)" Format(uuid)
-// @Success      200  {object}  dto.TaskScheduler
+// @Param        id   path      string  true  "Task ID (UUID)"
+// @Success      200  {object}  dto.TaskResponse
 // @Failure      400  {object}  dto.ErrorResponse
 // @Failure      404  {object}  dto.ErrorResponse "Task not found or not in 'pending' state"
 // @Failure      500  {object}  dto.ErrorResponse
@@ -192,8 +192,8 @@ func (h *TaskHandler) PauseTask(c *gin.Context) {
 // @Description  Resumes a 'paused' task, making it eligible for execution again.
 // @Tags         Scheduler
 // @Produce      json
-// @Param        id   path      string  true  "Task ID (UUID)" Format(uuid)
-// @Success      200  {object}  dto.TaskScheduler
+// @Param        id   path      string  true  "Task ID (UUID)"
+// @Success      200  {object}  dto.TaskResponse
 // @Failure      400  {object}  dto.ErrorResponse
 // @Failure      404  {object}  dto.ErrorResponse "Task not found or not in 'paused' state"
 // @Failure      500  {object}  dto.ErrorResponse

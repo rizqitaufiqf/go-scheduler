@@ -48,7 +48,7 @@ func (r *Scheduler) FindTasks(status string) ([]dto.TaskResponse, error) {
 	// Build a query that joins the necessary tables and selects specific fields
 	// for a more efficient database operation compared to Preload for this case.
 	query := r.db.WithContext(r.ctx).Model(&dto.TaskScheduler{}).
-		Select("task_schedulers.id, task_schedulers.payload, task_schedulers.scheduled_at, task_schedulers.priority, task_schedulers.retry_count, task_schedulers.max_retries, task_schedulers.status, task_schedulers.result, task_schedulers.created_at, task_schedulers.updated_at, te.name as task_entity_name, ta.name as task_action_name").
+		Select("task_schedulers.id, task_schedulers.payload, task_schedulers.scheduled_at, task_schedulers.priority, task_schedulers.max_retries, task_schedulers.status, task_schedulers.result, task_schedulers.created_at, task_schedulers.updated_at, te.name as task_entity_name, ta.name as task_action_name").
 		Joins("JOIN public.task_entities te ON te.id = task_schedulers.task_entity_id").
 		Joins("JOIN public.task_actions ta ON ta.id = task_schedulers.task_action_id").
 		Order("task_schedulers.created_at desc")
@@ -65,12 +65,15 @@ func (r *Scheduler) FindTasks(status string) ([]dto.TaskResponse, error) {
 }
 
 // PauseTask changes a task's status to 'paused' and removes it from the Redis queue.
-func (r *Scheduler) PauseTask(taskID uuid.UUID) (*dto.TaskScheduler, error) {
+func (r *Scheduler) PauseTask(taskID uuid.UUID) (*dto.TaskResponse, error) {
 	var task dto.TaskScheduler
 
 	err := r.db.WithContext(r.ctx).Transaction(func(tx *gorm.DB) error {
 		// 1. Find the task and lock the row. Only 'pending' tasks can be paused.
-		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&task, "id = ? AND status = ?", taskID, dto.StatusPending).Error; err != nil {
+		// Preload the entity and action to return the full response.
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+			Preload("TaskEntity").
+			Preload("TaskAction").First(&task, "id = ? AND status = ?", taskID, dto.StatusPending).Error; err != nil {
 			return err // Returns gorm.ErrRecordNotFound if not found or not pending
 		}
 
@@ -88,16 +91,38 @@ func (r *Scheduler) PauseTask(taskID uuid.UUID) (*dto.TaskScheduler, error) {
 		return nil
 	})
 
-	return &task, err
+	if err != nil {
+		return nil, err
+	}
+
+	// Construct the response DTO
+	response := &dto.TaskResponse{
+		ID:             task.ID,
+		TaskEntityName: task.TaskEntity.Name,
+		TaskActionName: task.TaskAction.Name,
+		Payload:        task.Payload,
+		ScheduledAt:    task.ScheduledAt,
+		Priority:       task.Priority,
+		MaxRetries:     task.MaxRetries,
+		Status:         task.Status,
+		Result:         task.Result,
+		CreatedAt:      task.CreatedAt,
+		UpdatedAt:      task.UpdatedAt,
+	}
+	return response, nil
 }
 
 // ResumeTask changes a task's status to 'pending' and adds it back to the Redis queue.
-func (r *Scheduler) ResumeTask(taskID uuid.UUID) (*dto.TaskScheduler, error) {
+func (r *Scheduler) ResumeTask(taskID uuid.UUID) (*dto.TaskResponse, error) {
 	var task dto.TaskScheduler
 
 	err := r.db.WithContext(r.ctx).Transaction(func(tx *gorm.DB) error {
 		// 1. Find the task and lock the row. Only 'paused' tasks can be resumed.
-		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&task, "id = ? AND status = ?", taskID, dto.StatusPaused).Error; err != nil {
+		// Preload the entity and action to return the full response.
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+			Preload("TaskEntity").
+			Preload("TaskAction").
+			First(&task, "id = ? AND status = ?", taskID, dto.StatusPaused).Error; err != nil {
 			return err // Returns gorm.ErrRecordNotFound if not found or not paused
 		}
 
@@ -114,5 +139,23 @@ func (r *Scheduler) ResumeTask(taskID uuid.UUID) (*dto.TaskScheduler, error) {
 		}).Err()
 	})
 
-	return &task, err
+	if err != nil {
+		return nil, err
+	}
+
+	// Construct the response DTO
+	response := &dto.TaskResponse{
+		ID:             task.ID,
+		TaskEntityName: task.TaskEntity.Name,
+		TaskActionName: task.TaskAction.Name,
+		Payload:        task.Payload,
+		ScheduledAt:    task.ScheduledAt,
+		Priority:       task.Priority,
+		MaxRetries:     task.MaxRetries,
+		Status:         task.Status,
+		Result:         task.Result,
+		CreatedAt:      task.CreatedAt,
+		UpdatedAt:      task.UpdatedAt,
+	}
+	return response, nil
 }
