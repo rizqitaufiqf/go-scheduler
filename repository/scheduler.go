@@ -138,33 +138,31 @@ func (r *Scheduler) RetryFailedTask(taskID uuid.UUID) (*dto.TaskResponse, error)
 	var task dto.TaskScheduler
 
 	err := r.db.WithContext(r.ctx).Transaction(func(tx *gorm.DB) error {
-		// 1. Find the task and lock the row. Only 'failed' tasks can be retried.
 		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
 			Preload("TaskEntity").
 			Preload("TaskAction").
 			First(&task, "id = ? AND status = ?", taskID, dto.StatusFailed).Error; err != nil {
-			return err // Returns gorm.ErrRecordNotFound if not found or not failed
+			return err
 		}
 
-		// 2. Update the status in the database back to 'pending'.
-		task.Status = dto.StatusPending
-		task.Result = "Manually retried by user." // Clear the old failure result
+		// failed -> retrying (konsisten dengan worker)
+		task.Status = dto.StatusRetrying
+		task.Result = "" // opsional: kosongkan error lama; atau simpan ke audit terpisah
+		// opsional: atur ScheduledAt = time.Now() agar konsisten, tapi karena pakai skor 0, tidak wajib
 		if err := tx.Save(&task).Error; err != nil {
 			return err
 		}
 
-		// 3. Add the task back to the Redis queue with a score of 0 to run immediately.
+		// antrikan untuk segera dieksekusi
 		return r.redis.ZAdd(r.ctx, TasksQueueKey(), &redis.Z{
 			Score:  0,
 			Member: task.ID.String(),
 		}).Err()
 	})
-
 	if err != nil {
 		return nil, err
 	}
 
-	// Return the updated task details
 	return r.FindTaskByID(taskID)
 }
 
@@ -173,35 +171,34 @@ func (r *Scheduler) RunTaskNow(taskID uuid.UUID) (*dto.TaskResponse, error) {
 	var task dto.TaskScheduler
 
 	err := r.db.WithContext(r.ctx).Transaction(func(tx *gorm.DB) error {
-		// 1. Find the task. It must be 'pending' or 'paused'.
+		// boleh run-now dari pending, paused, retrying
 		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
 			Preload("TaskEntity").
 			Preload("TaskAction").
-			First(&task, "id = ? AND status IN ?", taskID, []dto.TaskStatus{dto.StatusPending, dto.StatusPaused}).Error; err != nil {
+			First(&task, "id = ? AND status IN ?", taskID, []dto.TaskStatus{
+				dto.StatusPending, dto.StatusPaused, dto.StatusRetrying,
+			}).Error; err != nil {
 			return err
 		}
 
-		// 2. If paused, change its status to pending.
+		// jika paused, ubah ke pending (karena paused bukan state antre)
 		if task.Status == dto.StatusPaused {
 			task.Status = dto.StatusPending
 			if err := tx.Save(&task).Error; err != nil {
 				return err
 			}
 		}
-
-		// 3. Add/update the task in Redis with a score of 0 to make it run immediately.
-		// ZAdd will update the score if the member already exists.
+		// dorong ke antrean agar di-pick segera
 		return r.redis.ZAdd(r.ctx, TasksQueueKey(), &redis.Z{
-			Score:  0, // Score 0 ensures it's picked up by the worker on the next poll.
+			Score:  0, // next tick langsung diproses
 			Member: task.ID.String(),
 		}).Err()
 	})
-
 	if err != nil {
 		return nil, err
 	}
 
-	return r.FindTaskByID(taskID) // Return the updated task details
+	return r.FindTaskByID(taskID)
 }
 
 // ResumeTask changes a task's status to 'pending' and adds it back to the Redis queue.
@@ -252,28 +249,29 @@ func (r *Scheduler) ResumeTask(taskID uuid.UUID) (*dto.TaskResponse, error) {
 	return response, nil
 }
 
-// CancelTask changes a task's status to 'canceled' and removes it from the Redis queue if it's pending.
 func (r *Scheduler) CancelTask(taskID uuid.UUID) (*dto.TaskResponse, error) {
 	var task dto.TaskScheduler
 
 	err := r.db.WithContext(r.ctx).Transaction(func(tx *gorm.DB) error {
-		// 1. Find the task and lock the row. Only 'pending' or 'paused' tasks can be canceled.
-		// Preload the entity and action to return the full response.
+		// 1. Cari task, hanya yang statusnya pending, retrying atau paused yang bisa dibatalkan
 		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
 			Preload("TaskEntity").
 			Preload("TaskAction").
-			First(&task, "id = ? AND status IN ?", taskID, []dto.TaskStatus{dto.StatusPending, dto.StatusPaused}).Error; err != nil {
+			First(&task, "id = ? AND status IN ?", taskID, []dto.TaskStatus{dto.StatusPending, dto.StatusRetrying, dto.StatusPaused}).Error; err != nil {
 			return err // Returns gorm.ErrRecordNotFound if not found or not in a cancelable state
 		}
 
-		// 2. Update the status in the database.
+		// 2. Simpan status sebelumnya untuk menentukan apakah perlu dihapus dari Redis queue
+		prevStatus := task.Status
+
+		// 3. Update status di database menjadi 'canceled'
 		task.Status = dto.StatusCanceled
 		if err := tx.Save(&task).Error; err != nil {
 			return err
 		}
 
-		// 3. If the task was pending, remove it from the Redis queue. Paused tasks are already not in the queue.
-		if task.Status == dto.StatusPending {
+		// 4. Hapus task dari Redis queue jika sebelumnya statusnya pending atau retrying
+		if prevStatus == dto.StatusPending || prevStatus == dto.StatusRetrying {
 			if err := r.redis.ZRem(r.ctx, TasksQueueKey(), task.ID.String()).Err(); err != nil {
 				return err
 			}

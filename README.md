@@ -165,6 +165,113 @@ The following environment variables can be set in the `.env` file:
 | `WORKER_CONCURRENCY`           | Max number of tasks the worker can run at once.   | `10`      |
 | `WORKER_POLL_INTERVAL_SECONDS` | How often (in seconds) the worker polls for tasks. | `10`      |
 
+# 🧭 Daftar Status & Transisi Task
+
+Dokumentasi ini menjelaskan status-status task, penyimpanan di Redis, alur status, serta transisi status yang diizinkan dalam sistem penjadwalan dan eksekusi task.
+
+---
+
+## 📌 Daftar Status Task
+
+| Status | Peran / Makna | Ada di Redis? | Diubah oleh |
+| ------------ | -------------------------------------------------------------------------------------------------------------------------- | ------------- | ----------------------------- |
+| `pending` | Task dijadwalkan & menunggu waktu `ScheduledAt` untuk dijalankan. | ✅ Ya | API / Scheduler / Reconciler |
+| `paused` | Task dibekukan secara manual oleh admin/user. Tidak dieksekusi sampai di-*resume*. | ❌ Tidak | Admin/User |
+| `retrying` | Task gagal → dijadwalkan ulang untuk attempt berikutnya sesuai `ScheduledAt` (hasil backoff), atau manual retry (score 0). | ✅ Ya | Worker / Admin (manual retry) |
+| `processing` | Task sedang dikerjakan worker. | ❌ Tidak | Worker |
+| `completed` | Task selesai sukses. Terminal. | ❌ Tidak | Worker |
+| `failed` | Task gagal permanen setelah kehabisan retry. Terminal. | ❌ Tidak | Worker |
+| `canceled` | Task dibatalkan sebelum dijalankan (dari pending, paused, atau retrying). Terminal. | ❌ Tidak | Admin/User |
+
+---
+
+## 📝 Alur Status
+
+### 🟢 Alur Normal
+
+```
+pending → processing → completed
+```
+
+### 🔁 Alur Retry Otomatis
+
+```
+processing (gagal) → retrying (ScheduledAt baru)
+            ↓ (waktu retry tercapai)
+processing (ulang) → ... → completed / failed
+```
+
+### ✋ Pause / Resume
+
+```
+pending → paused → pending → processing
+```
+
+### 🚫 Cancel
+
+```
+(pending | paused | retrying) → canceled
+```
+
+### 🔄 Manual Retry (dari failed)
+
+```
+failed → retrying (score 0) → processing ...
+```
+
+### 🧰 Reconcile (Crash Recovery Startup)
+
+```
+processing (stuck karena crash) → pending (by system)
+↓
+Redis enqueue ulang
+↓
+processing (dijalankan ulang)
+```
+
+### 🧠 Catatan Teknis Penting
+
+- Redis queue hanya berisi task `pending` dan `retrying`.
+- Worker hanya mengeksekusi task dengan status `pending` atau `retrying`.
+- Transisi `processing → pending`  **hanya dilakukan oleh system saat proses reconcile di startup**, bukan bagian dari flow normal.
+-  `retrying` berperan sebagai state “penjadwalan ulang”, **tidak perlu berubah ke `pending`**. Worker langsung memproses task `retrying` saat waktunya tiba.
+- Terminal states (`completed`, `failed`, `canceled`) **tidak dapat diubah lagi**.
+
+---
+
+## 🔄 Transisi Status yang Diizinkan
+
+| Dari Status | Ke Status | Pelaku | Keterangan |
+| ------------ | ------------ | ----------------------- | ----------------------------------------------------------------------- |
+| `pending` | `processing` | Worker | Worker mengeksekusi saat waktunya tiba. |
+| `processing` | `completed` | Worker | Task sukses. |
+| `processing` | `retrying` | Worker | Task gagal, masih bisa di-retry → set ScheduledAt baru & enqueue ulang. |
+| `processing` | `failed` | Worker | Task gagal & sudah mencapai MaxRetries. |
+| `pending` | `paused` | Admin/User | Task dibekukan manual (ZREM). |
+| `paused` | `pending` | Admin/User | Task diaktifkan kembali (ZADD dengan ScheduledAt). |
+| `pending` | `canceled` | Admin/User | Task dibatalkan sebelum dijalankan. |
+| `retrying` | `processing` | Worker | Task diambil worker saat ScheduledAt retry tercapai. |
+| `retrying` | `canceled` | Admin/User | Task dibatalkan sebelum attempt berikutnya. |
+| `failed` | `retrying` | Admin/User | Manual retry now → masukkan antrean dengan score 0. |
+| `paused` | `canceled` | Admin/User | Task dibatalkan saat sedang paused. |
+| `processing` | `pending` | **System (Reconciler)** | Saat startup crash recovery → task “nyangkut” dipindah ke antrean lagi. |
+
+---
+
+## 🚫 Transisi yang Tidak Diizinkan
+
+| Dari Status | Ke Status (Tidak Diizinkan) | Alasan |
+| --------------------------------- | --------------------------- | ------------------------------------------------------------------------- |
+| `retrying` | `pending` | Tidak ada langkah ini di flow normal — worker langsung proses `retrying`. |
+| `processing` | `paused` / `canceled` | Tidak ada mekanisme soft-interrupt. |
+| `completed`, `failed`, `canceled` | ke status lain | Terminal states, tidak boleh diubah lagi. |
+
+---
+
+> ✨ **Catatan:**
+>  - Terminal state = `completed`, `failed`, dan `canceled`. Setelah masuk ke status ini, task tidak boleh lagi diubah statusnya.
+>  - Transisi status digunakan untuk menjaga konsistensi antara antrean Redis dan eksekusi worker.
+
 ## License
 
 This project is licensed under the Apache 2.0 License. See the LICENSE file for details.
