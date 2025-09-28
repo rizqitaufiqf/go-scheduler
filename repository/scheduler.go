@@ -159,3 +159,51 @@ func (r *Scheduler) ResumeTask(taskID uuid.UUID) (*dto.TaskResponse, error) {
 	}
 	return response, nil
 }
+
+// CancelTask changes a task's status to 'canceled' and removes it from the Redis queue if it's pending.
+func (r *Scheduler) CancelTask(taskID uuid.UUID) (*dto.TaskResponse, error) {
+	var task dto.TaskScheduler
+
+	err := r.db.WithContext(r.ctx).Transaction(func(tx *gorm.DB) error {
+		// 1. Find the task and lock the row. Only 'pending' or 'paused' tasks can be canceled.
+		// Preload the entity and action to return the full response.
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+			Preload("TaskEntity").
+			Preload("TaskAction").
+			First(&task, "id = ? AND status IN ?", taskID, []dto.TaskStatus{dto.StatusPending, dto.StatusPaused}).Error; err != nil {
+			return err // Returns gorm.ErrRecordNotFound if not found or not in a cancelable state
+		}
+
+		// 2. Update the status in the database.
+		task.Status = dto.StatusCanceled
+		if err := tx.Save(&task).Error; err != nil {
+			return err
+		}
+
+		// 3. If the task was pending, remove it from the Redis queue. Paused tasks are already not in the queue.
+		if task.Status == dto.StatusPending {
+			if err := r.redis.ZRem(r.ctx, TasksQueueKey(), task.ID.String()).Err(); err != nil {
+				return err
+			}
+		}
+
+		return nil
+	})
+
+	if err != nil {
+		return nil, err
+	}
+
+	// Construct the response DTO
+	response := &dto.TaskResponse{
+		ID:             task.ID,
+		TaskEntityName: task.TaskEntity.Name,
+		TaskActionName: task.TaskAction.Name,
+		Payload:        task.Payload,
+		ScheduledAt:    task.ScheduledAt,
+		Status:         task.Status,
+		Result:         "Task was canceled by the user.",
+		UpdatedAt:      task.UpdatedAt,
+	}
+	return response, nil
+}

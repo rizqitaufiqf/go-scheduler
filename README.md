@@ -44,7 +44,7 @@ The system allows for scheduling background tasks through a RESTful API. Tasks a
 ### 1. Clone the Repository
 
 ```sh
-git https://github.com/rizqitaufiqf/go-scheduler.git
+git clone https://github.com/rizqitaufiqf/go-scheduler.git
 cd go-scheduler
 ```
 
@@ -107,7 +107,7 @@ SCHEDULED_AT=$(date -d "+2 minutes" -u +"%Y-%m-%dT%H:%M:%SZ")
 # SCHEDULED_AT=$(date -v+2M -u +"%Y-%m-%dT%H:%M:%SZ")
 
 # Schedule the task
-curl -X POST http://localhost:8080/scheduler/products/create \
+curl -X POST http://localhost:8080/api/v1/scheduler/products/create \
 -H "Content-Type: application/json" \
 -d '{
     "scheduled_at": "'"$SCHEDULED_AT"'",
@@ -128,7 +128,7 @@ You will see the worker logs in your `docker-compose` output when the task is pi
 You can view all scheduled tasks and their statuses:
 
 ```sh
-curl http://localhost:8080/scheduler/tasks
+curl http://localhost:8080/api/v1/scheduler/tasks
 ```
 
 ## Project Structure

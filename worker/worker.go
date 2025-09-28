@@ -61,7 +61,7 @@ func (w *Worker) Start() {
 	}
 }
 
-// reconcileTasks finds tasks stuck in 'processing' or 'pending' state on startup and requeues them.
+// reconcileTasks finds tasks stuck in 'processing' or 'pending' or 'retrying' state on startup and requeues them.
 func (w *Worker) reconcileTasks() {
 	log.Println("Reconciling tasks...")
 
@@ -276,6 +276,7 @@ func getProcessorKey(entityName, actionName string) string {
 
 // registerProcessors initializes and maps task types to their processors.
 func (w *Worker) registerProcessors() {
+	// Register Product task processors
 	productRepo := repo.NewProductRepository(w.db)
 	w.processors[getProcessorKey(dto.TaskEntityProduct, dto.TaskActionCreate)] = &ProductCreateProcessor{repo: productRepo}
 	w.processors[getProcessorKey(dto.TaskEntityProduct, dto.TaskActionUpdate)] = &ProductUpdateProcessor{repo: productRepo}

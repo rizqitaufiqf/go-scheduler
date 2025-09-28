@@ -139,7 +139,7 @@ func (h *TaskHandler) GetTasks(c *gin.Context) {
 
 	if status != "" {
 		switch dto.TaskStatus(status) {
-		case dto.StatusPending, dto.StatusProcessing, dto.StatusCompleted, dto.StatusFailed, dto.StatusCanceled, dto.StatusPaused:
+		case dto.StatusPending, dto.StatusProcessing, dto.StatusCompleted, dto.StatusFailed, dto.StatusCanceled, dto.StatusPaused, dto.StatusRetrying:
 			// Status is valid, proceed.
 		default:
 			c.JSON(http.StatusBadRequest, dto.ErrorResponse{Error: "Invalid status query parameter."})
@@ -212,6 +212,37 @@ func (h *TaskHandler) ResumeTask(c *gin.Context) {
 			return
 		}
 		c.JSON(http.StatusInternalServerError, dto.ErrorResponse{Error: "Failed to resume task: " + err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, task)
+}
+
+// CancelTask cancels a scheduled task.
+// @Summary      Cancel a task
+// @Description  Cancels a 'pending' or 'paused' task, preventing it from being executed.
+// @Tags         Scheduler
+// @Produce      json
+// @Param        id   path      string  true  "Task ID (UUID)"
+// @Success      200  {object}  dto.TaskResponse
+// @Failure      400  {object}  dto.ErrorResponse
+// @Failure      404  {object}  dto.ErrorResponse "Task not found or not in a cancelable state ('pending' or 'paused')"
+// @Failure      500  {object}  dto.ErrorResponse
+// @Router       /scheduler/tasks/{id}/cancel [post]
+func (h *TaskHandler) CancelTask(c *gin.Context) {
+	id, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, dto.ErrorResponse{Error: "Invalid task ID"})
+		return
+	}
+
+	task, err := h.scheduler.CancelTask(id)
+	if err != nil {
+		if err == gorm.ErrRecordNotFound {
+			c.JSON(http.StatusNotFound, dto.ErrorResponse{Error: "Task not found or not in a cancelable state ('pending' or 'paused')"})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, dto.ErrorResponse{Error: "Failed to cancel task: " + err.Error()})
 		return
 	}
 
