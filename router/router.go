@@ -45,11 +45,14 @@ func SetupRouter(db *gorm.DB, s *repo.Scheduler) *gin.Engine {
 
 		// View tasks
 		schedulerRoutes.GET("/tasks", taskHandler.GetTasks)
+		schedulerRoutes.GET("/tasks/:id", taskHandler.GetTaskByID)
 
 		// Manage task state
 		schedulerRoutes.POST("/tasks/:id/pause", taskHandler.PauseTask)
 		schedulerRoutes.POST("/tasks/:id/resume", taskHandler.ResumeTask)
 		schedulerRoutes.POST("/tasks/:id/cancel", taskHandler.CancelTask)
+		schedulerRoutes.POST("/tasks/:id/run", taskHandler.RunTaskNow)
+		schedulerRoutes.POST("/tasks/:id/retry", taskHandler.RetryFailedTask)
 	}
 
 	return r

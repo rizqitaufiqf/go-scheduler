@@ -226,27 +226,29 @@ func (w *Worker) executeTask(taskIDStr string, attempt int) {
 			return
 		}
 
-		// schedule retry with backoff; persist BEFORE pushing to Redis
+		// Schedule retry with backoff.
 		backoffDuration := time.Duration(attempt*10) * time.Second
-		task.ScheduledAt = time.Now().Add(backoffDuration)
+		newScheduledAt := time.Now().Add(backoffDuration)
+		task.ScheduledAt = newScheduledAt
 		task.Status = dto.StatusRetrying
 
+		// Persist the new state BEFORE re-queuing.
 		if err := w.db.WithContext(w.ctx).Save(&task).Error; err != nil {
 			log.Printf("Error saving retry schedule for task %s: %v", task.ID, err)
 			return
 		}
 
-		// Re-queue the task for the next attempt.
-		// We do this by spawning a new goroutine that will execute the task again
-		// after the backoff duration. This avoids re-adding to Redis and keeps the
-		// retry logic self-contained within the worker process that holds the lock.
-		go func(id string, nextAttempt int) {
-			time.Sleep(backoffDuration)
-			// We don't release the semaphore here, as this goroutine is a continuation of the parent.
-			// The lock is also still held.
-			w.executeTask(id, nextAttempt)
-		}(taskIDStr, attempt+1)
-		log.Printf("Task %s failed, scheduled retry in %v. Error: %v", task.ID, backoffDuration, procErr)
+		// Re-queue the task in Redis with the new future execution time.
+		if err := w.redis.ZAdd(w.ctx, repo.TasksQueueKey(), &redis.Z{
+			Score:  float64(newScheduledAt.Unix()),
+			Member: task.ID.String(),
+		}).Err(); err != nil {
+			log.Printf("CRITICAL: Failed to re-queue task %s for retry: %v", task.ID, err)
+			// This is a critical error. The task is in the DB as 'retrying' but not in the queue.
+			// The reconcile process on next startup will fix this, but it's worth logging as critical.
+		}
+
+		log.Printf("Task %s failed, re-queued for retry in %v. Error: %v", task.ID, backoffDuration, procErr)
 		return
 	}
 
@@ -258,15 +260,6 @@ func (w *Worker) executeTask(taskIDStr string, attempt int) {
 		return
 	}
 	log.Printf("Task %s completed successfully", task.ID)
-}
-
-// getTaskIDs is a helper function to extract IDs from a slice of tasks.
-func getTaskIDs(tasks []dto.TaskScheduler) []uuid.UUID {
-	ids := make([]uuid.UUID, len(tasks))
-	for i, task := range tasks {
-		ids[i] = task.ID
-	}
-	return ids
 }
 
 // getProcessorKey creates a consistent key for the processors map.

@@ -156,6 +156,36 @@ func (h *TaskHandler) GetTasks(c *gin.Context) {
 	c.JSON(http.StatusOK, tasks)
 }
 
+// GetTaskByID retrieves a single task by its ID.
+// @Summary      Get a single task
+// @Description  Gets the full details of a single scheduled task by its ID.
+// @Tags         Scheduler
+// @Produce      json
+// @Param        id   path      string  true  "Task ID (UUID)"
+// @Success      200  {object}  dto.TaskResponse
+// @Failure      400  {object}  dto.ErrorResponse
+// @Failure      404  {object}  dto.ErrorResponse "Task not found"
+// @Failure      500  {object}  dto.ErrorResponse
+// @Router       /scheduler/tasks/{id} [get]
+func (h *TaskHandler) GetTaskByID(c *gin.Context) {
+	id, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, dto.ErrorResponse{Error: "Invalid task ID"})
+		return
+	}
+
+	task, err := h.scheduler.FindTaskByID(id)
+	if err != nil {
+		if err == gorm.ErrRecordNotFound {
+			c.JSON(http.StatusNotFound, dto.ErrorResponse{Error: "Task not found"})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, dto.ErrorResponse{Error: "Failed to retrieve task: " + err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, task)
+}
+
 // PauseTask pauses a scheduled task.
 // @Summary      Pause a task
 // @Description  Pauses a 'pending' task, preventing it from being executed.
@@ -181,6 +211,37 @@ func (h *TaskHandler) PauseTask(c *gin.Context) {
 			return
 		}
 		c.JSON(http.StatusInternalServerError, dto.ErrorResponse{Error: "Failed to pause task: " + err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, task)
+}
+
+// RunTaskNow manually triggers a task to run as soon as possible.
+// @Summary      Run a task now
+// @Description  Manually triggers a 'pending' or 'paused' task to be executed immediately by the next available worker.
+// @Tags         Scheduler
+// @Produce      json
+// @Param        id   path      string  true  "Task ID (UUID)"
+// @Success      200  {object}  dto.TaskResponse
+// @Failure      400  {object}  dto.ErrorResponse
+// @Failure      404  {object}  dto.ErrorResponse "Task not found or not in a runnable state ('pending' or 'paused')"
+// @Failure      500  {object}  dto.ErrorResponse
+// @Router       /scheduler/tasks/{id}/run [post]
+func (h *TaskHandler) RunTaskNow(c *gin.Context) {
+	id, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, dto.ErrorResponse{Error: "Invalid task ID"})
+		return
+	}
+
+	task, err := h.scheduler.RunTaskNow(id)
+	if err != nil {
+		if err == gorm.ErrRecordNotFound {
+			c.JSON(http.StatusNotFound, dto.ErrorResponse{Error: "Task not found or not in a runnable state ('pending' or 'paused')"})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, dto.ErrorResponse{Error: "Failed to run task: " + err.Error()})
 		return
 	}
 
@@ -243,6 +304,37 @@ func (h *TaskHandler) CancelTask(c *gin.Context) {
 			return
 		}
 		c.JSON(http.StatusInternalServerError, dto.ErrorResponse{Error: "Failed to cancel task: " + err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, task)
+}
+
+// RetryFailedTask manually re-queues a failed task for execution.
+// @Summary      Retry a failed task
+// @Description  Resets a 'failed' task to 'pending' and queues it for immediate execution.
+// @Tags         Scheduler
+// @Produce      json
+// @Param        id   path      string  true  "Task ID (UUID)"
+// @Success      200  {object}  dto.TaskResponse
+// @Failure      400  {object}  dto.ErrorResponse
+// @Failure      404  {object}  dto.ErrorResponse "Task not found or not in 'failed' state"
+// @Failure      500  {object}  dto.ErrorResponse
+// @Router       /scheduler/tasks/{id}/retry [post]
+func (h *TaskHandler) RetryFailedTask(c *gin.Context) {
+	id, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, dto.ErrorResponse{Error: "Invalid task ID"})
+		return
+	}
+
+	task, err := h.scheduler.RetryFailedTask(id)
+	if err != nil {
+		if err == gorm.ErrRecordNotFound {
+			c.JSON(http.StatusNotFound, dto.ErrorResponse{Error: "Task not found or not in 'failed' state"})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, dto.ErrorResponse{Error: "Failed to retry task: " + err.Error()})
 		return
 	}
 
