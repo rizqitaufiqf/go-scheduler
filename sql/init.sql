@@ -99,6 +99,8 @@ CREATE INDEX IF NOT EXISTS r_idx_sch_tasks_entity_id ON public.task_schedulers (
 CREATE INDEX IF NOT EXISTS r_idx_sch_tasks_action_id ON public.task_schedulers (task_action_id);
 CREATE INDEX IF NOT EXISTS r_idx_sch_tasks_entity_action_status ON public.task_schedulers (task_entity_id, task_action_id, status) WHERE deleted_at IS NULL;
 CREATE INDEX IF NOT EXISTS r_idx_sch_tasks_status ON public.task_schedulers (status) WHERE deleted_at IS NULL;
+CREATE INDEX IF NOT EXISTS r_idx_sch_tasks_scheduled_pending ON public.task_schedulers (scheduled_at) WHERE deleted_at IS NULL AND status = 'pending';
+CREATE INDEX IF NOT EXISTS r_idx_sch_tasks_scheduled_retrying ON public.task_schedulers (scheduled_at) WHERE deleted_at IS NULL AND status = 'retrying';
 
 -- ===================================================================
 -- 6) Seed Data
