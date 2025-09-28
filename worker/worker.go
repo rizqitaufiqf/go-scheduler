@@ -4,8 +4,10 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"math/rand"
 	"time"
 
+	"github.com/rizqitaufiqf/go-scheduler/config"
 	dto "github.com/rizqitaufiqf/go-scheduler/dto"
 	repo "github.com/rizqitaufiqf/go-scheduler/repository"
 
@@ -15,14 +17,11 @@ import (
 	"gorm.io/gorm/clause"
 )
 
-const lockTTL = 5 * time.Minute // How long to lock a task for processing
-
-// TaskProcessor defines the interface for processing a specific task type.
 type TaskProcessor interface {
 	Process(task *dto.TaskScheduler) error
 }
 
-// Worker is responsible for picking up and processing tasks.
+// Worker is the core component responsible for polling, claiming, and processing scheduled tasks.
 type Worker struct {
 	db           *gorm.DB
 	redis        *redis.Client
@@ -30,18 +29,32 @@ type Worker struct {
 	pollInterval time.Duration
 	concurrency  int
 	sem          chan struct{}            // Semaphore to limit concurrency
-	processors   map[string]TaskProcessor // Key is "ENTITY_NAME:ACTION_NAME"
+	processors   map[string]TaskProcessor // Key format: "ENTITY_NAME:ACTION_NAME"
+
+	// Timing and resilience configurations
+	lockTTL               time.Duration
+	periodicReconInterval time.Duration
+	maxFailRefresh        int
+	backoffBaseDelay      time.Duration
+	backoffMaxDelay       time.Duration
 }
 
-func NewWorker(ctx context.Context, db *gorm.DB, redis *redis.Client, concurrency int, pollInterval time.Duration) *Worker {
+// NewWorker creates and initializes a new Worker instance.
+func NewWorker(ctx context.Context, db *gorm.DB, redis *redis.Client, cfg *config.Config) *Worker {
 	w := &Worker{
 		db:           db,
 		redis:        redis,
 		ctx:          ctx,
-		pollInterval: pollInterval,
-		concurrency:  concurrency,
-		sem:          make(chan struct{}, concurrency),
+		pollInterval: cfg.WorkerPollInterval,
+		concurrency:  cfg.WorkerConcurrency,
+		sem:          make(chan struct{}, cfg.WorkerConcurrency),
 		processors:   make(map[string]TaskProcessor),
+
+		lockTTL:               cfg.LockTTL,
+		periodicReconInterval: cfg.PeriodicReconInterval,
+		maxFailRefresh:        cfg.MaxFailRefresh,
+		backoffBaseDelay:      cfg.BackoffBaseDelay,
+		backoffMaxDelay:       cfg.BackoffMaxDelay,
 	}
 	w.registerProcessors()
 	return w
@@ -50,8 +63,11 @@ func NewWorker(ctx context.Context, db *gorm.DB, redis *redis.Client, concurrenc
 // Start begins the worker's processing loop.
 func (w *Worker) Start() {
 	log.Printf("Starting worker with concurrency=%d and poll_interval=%s...", w.concurrency, w.pollInterval)
-	// On startup, reconcile any tasks that were 'processing' in case of a crash.
+	// On startup, run a one-time reconciliation to recover tasks from a potential previous crash.
 	w.reconcileTasks()
+
+	// Start a background process for periodic self-healing of the task queue.
+	go w.startPeriodicReconciliation()
 
 	ticker := time.NewTicker(w.pollInterval)
 	defer ticker.Stop()
@@ -61,13 +77,63 @@ func (w *Worker) Start() {
 	}
 }
 
-// reconcileTasks finds tasks stuck in 'processing' or 'pending' or 'retrying' state on startup and requeues them.
+// startPeriodicReconciliation launches a background goroutine that periodically checks for inconsistencies
+// between the database (the source of truth) and the Redis queue.
+func (w *Worker) startPeriodicReconciliation() {
+	ticker := time.NewTicker(w.periodicReconInterval)
+	defer ticker.Stop()
+
+	log.Printf("Starting periodic reconciler to run every %v", w.periodicReconInterval)
+
+	for range ticker.C {
+		w.reconcileMissingQueueTasks()
+	}
+}
+
+// reconcileMissingQueueTasks is a self-healing mechanism. It finds tasks in the database that are in a
+// queueable state ('pending', 'retrying') but are either missing from the Redis queue or have an incorrect score, and corrects them.
+func (w *Worker) reconcileMissingQueueTasks() {
+	log.Println("Running periodic check for tasks missing from queue...")
+
+	var tasks []dto.TaskScheduler
+	// Look for tasks in a queueable state scheduled within the last 24 hours.
+	// This window prevents checking very old, likely irrelevant tasks.
+	err := w.db.WithContext(w.ctx).
+		Where("status IN ? AND scheduled_at > ?",
+			[]dto.TaskStatus{dto.StatusPending, dto.StatusRetrying},
+			time.Now().Add(-24*time.Hour),
+		).Find(&tasks).Error
+
+	if err != nil {
+		log.Printf("Periodic Reconciler: Error fetching tasks: %v", err)
+		return
+	}
+
+	for _, task := range tasks {
+		// Check if the task exists in the Redis sorted set and if its score is correct.
+		score, err := w.redis.ZScore(w.ctx, repo.TasksQueueKey(), task.ID.String()).Result()
+		expectedScore := float64(task.ScheduledAt.Unix())
+
+		// If the task is missing from the queue (err == redis.Nil) or its score (schedule time)
+		// is out of sync with the database, we correct it by re-adding it with the proper score.
+		if err == redis.Nil || (err == nil && score != expectedScore) {
+			if err == redis.Nil {
+				log.Printf("Periodic Reconciler: Found missing task %s in queue. Re-queuing.", task.ID)
+			} else {
+				log.Printf("Periodic Reconciler: Found task %s with incorrect score. Updating score from %f to %f.", task.ID, score, expectedScore)
+			}
+			_ = w.redis.ZAdd(w.ctx, repo.TasksQueueKey(), &redis.Z{Score: expectedScore, Member: task.ID.String()}).Err()
+		}
+	}
+}
+
+// reconcileTasks is a one-time recovery process that runs on worker startup. It finds tasks that
+// may have been left in an inconsistent state (e.g., 'processing') due to a crash and requeues them.
 func (w *Worker) reconcileTasks() {
 	log.Println("Reconciling tasks...")
 
 	var tasksToReconcile []dto.TaskScheduler
-	// 1. Find all tasks that were stuck in 'processing' OR are 'pending' and past their scheduled time.
-	// This covers both crashed workers and tasks that might have been missed if Redis lost data.
+	// 1. Find all tasks that are in a state that might require recovery.
 	statuses := []dto.TaskStatus{dto.StatusProcessing, dto.StatusPending, dto.StatusRetrying}
 	if err := w.db.WithContext(w.ctx).
 		Where("status IN ?", statuses).
@@ -82,86 +148,157 @@ func (w *Worker) reconcileTasks() {
 	}
 
 	log.Printf("Found %d tasks to reconcile. Re-queuing in Redis and updating status...", len(tasksToReconcile))
-	var idsToSetPending []uuid.UUID
+	var (
+		idsToSetPending   []uuid.UUID
+		idsToResetRetries []uuid.UUID
+	)
+
 	for _, task := range tasksToReconcile {
-		// 2. Re-add the task to the Redis sorted set.
-		// The worker will pick it up based on its original scheduled_at time.
+		// 2. Ensure the task exists in the Redis queue. ZADD is idempotent and will just update the score if it already exists.
 		w.redis.ZAdd(w.ctx, repo.TasksQueueKey(), &redis.Z{
 			Score:  float64(task.ScheduledAt.Unix()),
 			Member: task.ID.String(),
 		})
 
-		// Only change status if it was 'processing'. 'pending' and 'retrying' are already valid queueable states.
-		if task.Status == dto.StatusProcessing {
-			idsToSetPending = append(idsToSetPending, task.ID)
+		// 3. Collect IDs for bulk status updates based on their state.
+		switch task.Status {
+		case dto.StatusProcessing:
+			// A task is stuck in 'processing' but its lock has expired. This indicates a crash.
+			// It's safe to move it back to 'pending' for re-processing.
+			if val, _ := w.redis.Get(w.ctx, repo.TaskLockKey(task.ID.String())).Result(); val == "" {
+				idsToSetPending = append(idsToSetPending, task.ID)
+			}
+		case dto.StatusRetrying:
+			idsToResetRetries = append(idsToResetRetries, task.ID)
 		}
 	}
 
-	// 3. Bulk update the status of all tasks that were stuck in 'processing' back to 'pending'.
-	// We leave 'retrying' tasks as they are.
+	// 4. Atomically update the status of all recovered 'processing' tasks back to 'pending'.
 	if len(idsToSetPending) > 0 {
 		if err := w.db.WithContext(w.ctx).Model(&dto.TaskScheduler{}).Where("id IN ?", idsToSetPending).Update("status", dto.StatusPending).Error; err != nil {
 			log.Printf("Error updating status for reconciled tasks: %v", err)
-			return
+			// Do not return here, try to process the other updates
 		}
 	}
+
+	// 5. As requested by business logic, reset the retry_count for all 'retrying' tasks upon restart.
+	// if len(idsToResetRetries) > 0 {
+	// 	if err := w.db.WithContext(w.ctx).Model(&dto.TaskScheduler{}).Where("id IN ?", idsToResetRetries).Update("retry_count", 0).Error; err != nil {
+	// 		log.Printf("Error resetting retry_count for reconciled tasks: %v", err)
+	// 		return
+	// 	}
+	// }
 
 	log.Println("Reconciliation complete.")
 }
 
-// processDueTasks fetches and processes tasks that are scheduled to run.
+// processDueTasks is the main polling function. It attempts to claim and dispatch due tasks from the queue.
 func (w *Worker) processDueTasks() {
-	// Fetch tasks from Redis that are due (score <= now)
-	taskIDs, err := w.redis.ZRangeByScore(w.ctx, repo.TasksQueueKey(), &redis.ZRangeBy{
-		Min: "0",
-		Max: fmt.Sprintf("%d", time.Now().Unix()),
-	}).Result()
-
-	if err != nil {
-		if err != redis.Nil {
-			log.Printf("Error fetching due tasks from Redis: %v", err)
-		}
+	// If the concurrency limit is already reached, don't bother trying to claim more tasks.
+	if len(w.sem) == cap(w.sem) {
+		log.Println("Concurrency limit reached, pausing claims for this tick.")
 		return
 	}
 
-	for _, taskIDStr := range taskIDs {
-		log.Println("Processing task:", taskIDStr)
-		w.sem <- struct{}{} // Acquire a token
-		go func(id string, attempt int) {
-			defer func() { <-w.sem }() // Release token
-			w.executeTask(id, attempt)
-		}(taskIDStr, 1) // First attempt is always 1
+	// This Lua script atomically finds a due task, acquires a lock, and removes it from the queue.
+	// This is a critical optimization to prevent the "thundering herd" problem, where multiple
+	// workers might fetch and try to process the same task simultaneously.
+	const luaClaim = `
+		-- Find the next due task
+		local ids = redis.call("ZRANGEBYSCORE", KEYS[1], 0, ARGV[1], "LIMIT", 0, 1)
+		if #ids == 0 then
+			return nil
+		end
+		local id = ids[1]
+
+		-- Try to acquire a lock for this task ID
+		if redis.call("SET", KEYS[2]..id, ARGV[2], "PX", ARGV[3], "NX") then
+			-- Lock acquired, now remove from the queue
+			redis.call("ZREM", KEYS[1], id)
+			return id
+		end
+
+		-- Could not acquire lock (another worker was faster), so return nil
+		return nil
+    `
+	claimScript := redis.NewScript(luaClaim)
+
+	// Attempt to claim new tasks until the worker's concurrency capacity is full.
+	for i := 0; i < w.concurrency; i++ {
+		// If we've reached the concurrency limit, stop trying to claim more tasks.
+		if len(w.sem) == cap(w.sem) {
+			break
+		}
+
+		// Use a unique token for the lock to ensure we can safely release it later.
+		token := uuid.NewString()
+		now := time.Now().Unix()
+		lockMillis := w.lockTTL.Milliseconds()
+
+		taskID, err := claimScript.Run(w.ctx, w.redis, []string{repo.TasksQueueKey(), repo.TaskLockKeyPrefix()}, now, token, lockMillis).Result()
+		if err == redis.Nil {
+			break // No more due tasks
+		}
+		if err != nil {
+			log.Printf("Error running claim script: %v", err)
+			continue
+		}
+
+		if taskIDStr, ok := taskID.(string); ok {
+			log.Println("Claimed task:", taskIDStr)
+			w.sem <- struct{}{} // Acquire a semaphore slot
+			go func(id string, lockToken string) {
+				defer func() { <-w.sem }() // Release semaphore slot
+				w.executeTask(id, lockToken)
+			}(taskIDStr, token)
+		}
 	}
 }
 
-func (w *Worker) executeTask(taskIDStr string, attempt int) {
+func (w *Worker) executeTask(taskIDStr string, token string) {
+	now := time.Now()
 	lockKey := repo.TaskLockKey(taskIDStr)
 
-	// 1) Acquire Redis lock fast to avoid thundering herd
-	locked, err := w.redis.SetNX(w.ctx, lockKey, "processing", lockTTL).Result()
-	if err != nil {
-		log.Printf("Redis SetNX error for %s: %v", taskIDStr, err)
-		return
-	}
-	if !locked {
-		// someone else is processing
-		return
-	}
-	// always attempt to delete lock; if you need refresh logic for long jobs, implement it
-	defer func() {
-		if _, err := w.redis.Del(w.ctx, lockKey).Result(); err != nil {
-			log.Printf("Warning: failed to delete lock %s: %v", lockKey, err)
+	// Start a watchdog goroutine to periodically refresh the lock's TTL. This is essential for
+	// long-running jobs to prevent the lock from expiring, which could lead to another worker
+	// erroneously picking up the same task.
+	done := make(chan struct{})
+	go func() {
+		// Ticker fires at half the lock's TTL to ensure timely refresh.
+		ticker := time.NewTicker(w.lockTTL / 2)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				// Lua script to safely extend the lock's TTL only if we still own it.
+				const luaRefresh = `if redis.call("GET", KEYS[1]) == ARGV[1] then return redis.call("PEXPIRE", KEYS[1], ARGV[2]) else return 0 end`
+				w.redis.Eval(w.ctx, luaRefresh, []string{lockKey}, token, int64(w.lockTTL/time.Millisecond)).Err()
+			case <-done:
+				// The main function has finished, so stop the watchdog.
+				return
+			}
 		}
 	}()
 
-	// parse ID
+	// Defer the lock release. This Lua script ensures we only delete the lock if we still own it
+	// (i.e., the token matches), preventing the accidental deletion of a lock acquired by another worker.
+	defer func() {
+		const lua = `if redis.call("GET", KEYS[1]) == ARGV[1] then return redis.call("DEL", KEYS[1]) else return 0 end`
+		_ = w.redis.Eval(w.ctx, lua, []string{lockKey}, token).Err()
+	}()
+
 	taskID, err := uuid.Parse(taskIDStr)
 	if err != nil {
 		log.Printf("Invalid task ID '%s': %v", taskIDStr, err)
 		return
 	}
 
-	// 2) Start DB tx and lock row FOR UPDATE to prevent concurrent DB updates
+	// Ensure the watchdog is stopped when the function exits.
+	// This defer runs *before* the lock release defer because of Go's LIFO (Last-In, First-Out) defer order.
+	defer close(done)
+
+	// 1. Begin a database transaction and acquire a pessimistic row-level lock (FOR UPDATE).
+	// This prevents any other process from modifying this task record in the DB while we work.
 	tx := w.db.WithContext(w.ctx).Begin()
 	var task dto.TaskScheduler
 	if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
@@ -176,28 +313,25 @@ func (w *Worker) executeTask(taskIDStr string, attempt int) {
 		return
 	}
 
-	// 3) Check preconditions (DB is source of truth)
+	// 2. Validate preconditions using the authoritative data from the database.
 	if task.DeletedAt.Valid {
 		tx.Rollback()
-		// task deleted -> nothing to do
+		// Task has been soft-deleted, so there's nothing to do.
 		return
 	}
 	// If not in a runnable state (pending or retrying), skip.
 	if task.Status != dto.StatusPending && task.Status != dto.StatusRetrying {
 		tx.Rollback()
-		// If you removed from Redis earlier, prefer enqueuer to re-add;
-		// do NOT re-add automatically here to avoid races with admin actions.
+		// The task is not in a runnable state (e.g., it was paused or canceled). Stop processing.
 		return
 	}
 
-	// 4) Remove from Redis queue AFTER verifying DB (we hold Redis lock)
-	if _, err := w.redis.ZRem(w.ctx, repo.TasksQueueKey(), taskIDStr).Result(); err != nil {
-		// Log, but continue — DB authoritative
-		log.Printf("Warning: ZREM failed for %s: %v", taskIDStr, err)
-	}
-
-	// 5) Mark as processing; persist BEFORE actual processing
+	// 3. Update task state to 'processing' and commit before execution.
 	task.Status = dto.StatusProcessing
+	// Increment the retry count for this attempt.
+	task.RetryCount++
+	// Record the start time for observability.
+	task.StartedAt = &now
 	if err := tx.Save(&task).Error; err != nil {
 		tx.Rollback()
 		log.Printf("Error marking task %s processing: %v", task.ID, err)
@@ -208,31 +342,53 @@ func (w *Worker) executeTask(taskIDStr string, attempt int) {
 		return
 	}
 
-	log.Printf("Processing task %s (%s:%s), attempt %d/%d", task.ID, task.TaskEntity.Name, task.TaskAction.Name, attempt, task.MaxRetries)
+	log.Printf("Processing task %s (%s:%s), attempt %d/%d", task.ID, task.TaskEntity.Name, task.TaskAction.Name, task.RetryCount, task.MaxRetries)
 
 	time.Sleep(10 * time.Second)
-	// 6) Execute processing outside transaction (so long-running tasks don't block DB)
+	// 4. Execute the actual task logic. This is done outside the database transaction.
 	procErr := w.process(&task)
 
-	// 7) Outcome handling — update DB and requeue if needed
+	// 5. Handle the outcome of the task execution.
 	if procErr != nil {
-		task.Result = procErr.Error()
-		if attempt >= task.MaxRetries {
+		if task.RetryCount >= task.MaxRetries {
+			now := time.Now()
+			task.FinishedAt = &now
+			task.Result = procErr.Error()
+			// errMsg := procErr.Error()
+			// if len(errMsg) > 2000 {
+			// 	errMsg = errMsg[:2000]
+			// }
+			// task.Result = errMsg
+
 			task.Status = dto.StatusFailed
 			if err := w.db.WithContext(w.ctx).Save(&task).Error; err != nil {
 				log.Printf("Error saving failed task %s: %v", task.ID, err)
 			}
-			log.Printf("Task %s failed permanently after %d attempts: %v", task.ID, attempt, procErr)
+			log.Printf("Task %s failed permanently after %d attempts: %v", task.ID, task.RetryCount, procErr)
 			return
 		}
 
-		// Schedule retry with backoff.
-		backoffDuration := time.Duration(attempt*10) * time.Second
-		newScheduledAt := time.Now().Add(backoffDuration)
+		// The task failed but can be retried. Calculate the next attempt time using exponential backoff with jitter.
+		// Calculate exponential backoff: base * 2^(retry_count-1), capped at maxDelay.
+		backoff := min(w.backoffBaseDelay*time.Duration(1<<uint(task.RetryCount-1)), w.backoffMaxDelay)
+		// Add jitter (a random duration up to 20% of the backoff) to spread out retries.
+		jitter := time.Duration(rand.Int63n(int64(backoff / 5)))
+		totalDelay := backoff + jitter
+		newScheduledAt := time.Now().Add(totalDelay)
+
+		// Update the task object with the new schedule, status, and the latest error details.
 		task.ScheduledAt = newScheduledAt
 		task.Status = dto.StatusRetrying
+		now := time.Now()
+		task.LastErrorAt = &now
+		task.Result = procErr.Error()
+		errMsg := procErr.Error()
+		if len(errMsg) > 2000 {
+			errMsg = errMsg[:2000]
+		}
+		task.Result = errMsg
 
-		// Persist the new state BEFORE re-queuing.
+		// Persist the 'retrying' state to the database BEFORE re-adding it to the Redis queue.
 		if err := w.db.WithContext(w.ctx).Save(&task).Error; err != nil {
 			log.Printf("Error saving retry schedule for task %s: %v", task.ID, err)
 			return
@@ -244,15 +400,17 @@ func (w *Worker) executeTask(taskIDStr string, attempt int) {
 			Member: task.ID.String(),
 		}).Err(); err != nil {
 			log.Printf("CRITICAL: Failed to re-queue task %s for retry: %v", task.ID, err)
-			// This is a critical error. The task is in the DB as 'retrying' but not in the queue.
+			// This is a critical but recoverable error. The task is in the DB as 'retrying' but not in the queue.
 			// The reconcile process on next startup will fix this, but it's worth logging as critical.
 		}
 
-		log.Printf("Task %s failed, re-queued for retry in %v. Error: %v", task.ID, backoffDuration, procErr)
+		log.Printf("Task %s failed, re-queued for retry in %v. Error: %v", task.ID, totalDelay.Round(time.Second), procErr)
 		return
 	}
 
-	// success
+	// Task completed successfully.
+	now = time.Now()
+	task.FinishedAt = &now
 	task.Status = dto.StatusCompleted
 	task.Result = "Success"
 	if err := w.db.WithContext(w.ctx).Save(&task).Error; err != nil {
@@ -276,6 +434,7 @@ func (w *Worker) registerProcessors() {
 	w.processors[getProcessorKey(dto.TaskEntityProduct, dto.TaskActionDelete)] = &ProductDeleteProcessor{repo: productRepo}
 }
 
+// process looks up and dispatches a task to its registered processor.
 func (w *Worker) process(task *dto.TaskScheduler) error {
 	// Create a key from the loaded entity and action names
 	key := getProcessorKey(task.TaskEntity.Name, task.TaskAction.Name)

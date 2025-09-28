@@ -14,6 +14,12 @@ func TasksQueueKey() string {
 	return fmt.Sprintf("%s:tasks", redisKeyPrefix)
 }
 
+// TaskLockKeyPrefix returns the prefix for task locks.
+// The full key is constructed by appending the task ID.
+func TaskLockKeyPrefix() string {
+	return fmt.Sprintf("%s:lock:task:", redisKeyPrefix)
+}
+
 // TaskLockKey returns the key for the distributed lock for a specific task.
 // Key format: "scheduler:lock:task:{taskID}"
 func TaskLockKey(taskID string) string {

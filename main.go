@@ -49,7 +49,7 @@ func main() {
 	// 4. Initialize Scheduler and Worker
 	ctx := context.Background()
 	appScheduler := scheduler.NewScheduler(ctx, gormDB, redisClient)
-	appWorker := worker.NewWorker(ctx, gormDB, redisClient, cfg.WorkerConcurrency, cfg.WorkerPollInterval)
+	appWorker := worker.NewWorker(ctx, gormDB, redisClient, cfg)
 
 	// 5. Start the background worker in a goroutine
 	go appWorker.Start()

@@ -155,15 +155,19 @@ The following environment variables can be set in the `.env` file:
 
 | Variable                       | Description                                       | Default |
 | ------------------------------ | ------------------------------------------------- | ------- |
-| `POSTGRES_USER`                | PostgreSQL username.                              | `user`    |
-| `POSTGRES_PASSWORD`            | PostgreSQL password.                              | `password`  |
-| `POSTGRES_DB`                  | PostgreSQL database name.                         | `scheduler_db`|
-| `POSTGRES_HOST`                | Hostname for the PostgreSQL server.               | `postgresql`|
-| `POSTGRES_PORT`                | Port for the PostgreSQL server.                   | `5432`    |
-| `REDIS_ADDR`                   | Address for the Redis server.                     | `redis:6379`|
-| `TZ`                           | Timezone for the application.                     | `Asia/Jakarta`|
-| `WORKER_CONCURRENCY`           | Max number of tasks the worker can run at once.   | `10`      |
-| `WORKER_POLL_INTERVAL_SECONDS` | How often (in seconds) the worker polls for tasks. | `10`      |
+| `POSTGRES_USER`                     | PostgreSQL username.                              | `user`    |
+| `POSTGRES_PASSWORD`                 | PostgreSQL password.                              | `password`  |
+| `POSTGRES_DB`                       | PostgreSQL database name.                         | `scheduler_db`|
+| `POSTGRES_HOST`                     | Hostname for the PostgreSQL server.               | `postgresql`|
+| `POSTG_PORT`                     | Port for the PostgreSQL server.                   | `5432`    |
+| `REDIS_ADDR`                        | Address for the Redis server.                     | `redis:6379`|
+| `TZ`                                | Timezone for the application.                     | `Asia/Jakarta`|
+| `WORKER_CONCURRENCY`                | Max number of tasks the worker can run at once.   | `10`      |
+| `WORKER_POLL_INTERVAL_SECONDS`      | How often (in seconds) the worker polls for tasks. | `10`      |
+| `LOCK_TTL_SECONDS`                  | Duration (in seconds) a task lock is held.        | `300`     |
+| `PERIODIC_RECON_INTERVAL_SECONDS` | How often (in seconds) the self-healing runs.   | `300`     |
+| `BACKOFF_BASE_DELAY_SECONDS`        | The base delay for the first retry attempt.       | `5`       |
+| `BACKOFF_MAX_DELAY_SECONDS`         | The maximum delay between any two retry attempts. | `300`     |
 
 # 🧭 Daftar Status & Transisi Task
 
