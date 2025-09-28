@@ -182,12 +182,12 @@ func (w *Worker) reconcileTasks() {
 	}
 
 	// 5. As requested by business logic, reset the retry_count for all 'retrying' tasks upon restart.
-	// if len(idsToResetRetries) > 0 {
-	// 	if err := w.db.WithContext(w.ctx).Model(&dto.TaskScheduler{}).Where("id IN ?", idsToResetRetries).Update("retry_count", 0).Error; err != nil {
-	// 		log.Printf("Error resetting retry_count for reconciled tasks: %v", err)
-	// 		return
-	// 	}
-	// }
+	if len(idsToResetRetries) > 0 {
+		if err := w.db.WithContext(w.ctx).Model(&dto.TaskScheduler{}).Where("id IN ?", idsToResetRetries).Update("retry_count", 0).Error; err != nil {
+			log.Printf("Error resetting retry_count for reconciled tasks: %v", err)
+			return
+		}
+	}
 
 	log.Println("Reconciliation complete.")
 }
@@ -204,6 +204,12 @@ func (w *Worker) processDueTasks() {
 	// This is a critical optimization to prevent the "thundering herd" problem, where multiple
 	// workers might fetch and try to process the same task simultaneously.
 	const luaClaim = `
+		-- KEYS[1]: The queue ZSET key (e.g., "scheduler:tasks")
+		-- KEYS[2]: The lock key prefix (e.g., "scheduler:lock:task:")
+		-- ARGV[1]: Current time (unix seconds)
+		-- ARGV[2]: The lock token (a random UUID)
+		-- ARGV[3]: The lock TTL in milliseconds (e.g., 300000 for 5 minutes)
+
 		-- Find the next due task
 		local ids = redis.call("ZRANGEBYSCORE", KEYS[1], 0, ARGV[1], "LIMIT", 0, 1)
 		if #ids == 0 then
@@ -271,8 +277,18 @@ func (w *Worker) executeTask(taskIDStr string, token string) {
 			select {
 			case <-ticker.C:
 				// Lua script to safely extend the lock's TTL only if we still own it.
-				const luaRefresh = `if redis.call("GET", KEYS[1]) == ARGV[1] then return redis.call("PEXPIRE", KEYS[1], ARGV[2]) else return 0 end`
-				w.redis.Eval(w.ctx, luaRefresh, []string{lockKey}, token, int64(w.lockTTL/time.Millisecond)).Err()
+				const luaRefresh = `
+					-- KEYS[1]: The lock key (e.g., "scheduler:lock:task:<id>")
+					-- ARGV[1]: The token we hold (the value of the lock)
+					-- ARGV[2]: The new TTL in milliseconds
+					
+					if redis.call("GET", KEYS[1]) == ARGV[1] then 
+						return redis.call("PEXPIRE", KEYS[1], ARGV[2]) 
+					else 
+						return 0 
+					end
+				`
+				w.redis.Eval(w.ctx, luaRefresh, []string{lockKey}, token, int64(w.lockTTL.Milliseconds())).Err()
 			case <-done:
 				// The main function has finished, so stop the watchdog.
 				return
@@ -283,7 +299,16 @@ func (w *Worker) executeTask(taskIDStr string, token string) {
 	// Defer the lock release. This Lua script ensures we only delete the lock if we still own it
 	// (i.e., the token matches), preventing the accidental deletion of a lock acquired by another worker.
 	defer func() {
-		const lua = `if redis.call("GET", KEYS[1]) == ARGV[1] then return redis.call("DEL", KEYS[1]) else return 0 end`
+		const lua = `
+			-- KEYS[1]: The lock key (e.g., "scheduler:lock:task:<id>")
+			-- ARGV[1]: The token we hold (the value of the lock)
+			
+			if redis.call("GET", KEYS[1]) == ARGV[1] then
+				return redis.call("DEL", KEYS[1])
+			else
+				return 0
+			end
+		`
 		_ = w.redis.Eval(w.ctx, lua, []string{lockKey}, token).Err()
 	}()
 

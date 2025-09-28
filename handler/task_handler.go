@@ -1,8 +1,9 @@
 package handler
 
 import (
+	"crypto/sha256"
 	"encoding/json"
-
+	"fmt"
 	"net/http"
 	"time"
 
@@ -10,7 +11,6 @@ import (
 	"github.com/google/uuid"
 	dto "github.com/rizqitaufiqf/go-scheduler/dto"
 	repo "github.com/rizqitaufiqf/go-scheduler/repository"
-	"gorm.io/datatypes"
 	"gorm.io/gorm"
 )
 
@@ -23,41 +23,60 @@ func NewTaskHandler(db *gorm.DB, s *repo.Scheduler) *TaskHandler {
 	return &TaskHandler{db: db, scheduler: s}
 }
 
-type ScheduleRequest struct {
-	ScheduledAt time.Time       `json:"scheduled_at" binding:"required" example:"2025-12-01T15:04:05Z"`
-	MaxRetries  *int            `json:"max_retries" example:"5"`
-	Priority    *int            `json:"priority" example:"10"`
-	Payload     json.RawMessage `json:"payload" binding:"required" swaggertype:"object"`
-}
-
-func (h *TaskHandler) schedule(c *gin.Context, entityName, actionName string) {
-	var req ScheduleRequest
+// ScheduleGenericTask schedules any valid task based on the provided entity and action names.
+// @Summary      Schedule a generic task
+// @Description  Schedules any valid task by providing entity, action, and payload in the request body.
+// @Tags         Scheduler
+// @Accept       json
+// @Produce      json
+// @Param        task  body      dto.GenericScheduleRequest  true  "Generic Task Scheduling Details"
+// @Success      202   {object}  dto.TaskScheduler
+// @Failure      400   {object}  dto.ErrorResponse
+// @Failure      404   {object}  dto.ErrorResponse "If entity or action is not found"
+// @Failure      500   {object}  dto.ErrorResponse
+// @Router       /scheduler/tasks [post]
+func (h *TaskHandler) ScheduleGenericTask(c *gin.Context) {
+	var req dto.GenericScheduleRequest
+	// 1. Bind and validate the incoming JSON request against the DTO.
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, dto.ErrorResponse{Error: err.Error()})
 		return
 	}
 
-	// Find Entity and Action IDs from the database
-	var entity dto.TaskEntity
-	if err := h.db.Where("name = ?", entityName).First(&entity).Error; err != nil {
-		c.JSON(http.StatusNotFound, dto.ErrorResponse{Error: "Task entity not found: " + entityName})
+	// Validate entity & action from master tables
+	entity, err := h.scheduler.FindEntityByName(req.Entity)
+	if err != nil {
+		if err == gorm.ErrRecordNotFound {
+			c.JSON(http.StatusNotFound, dto.ErrorResponse{Error: "Task entity not found: " + req.Entity})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, dto.ErrorResponse{Error: "Failed to validate entity: " + err.Error()})
+		return
+	}
+	action, err := h.scheduler.FindActionByName(req.Action)
+	if err != nil {
+		if err == gorm.ErrRecordNotFound {
+			c.JSON(http.StatusNotFound, dto.ErrorResponse{Error: "Task action not found: " + req.Action})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, dto.ErrorResponse{Error: "Failed to validate action: " + err.Error()})
 		return
 	}
 
-	var action dto.TaskAction
-	if err := h.db.Where("name = ?", actionName).First(&action).Error; err != nil {
-		c.JSON(http.StatusNotFound, dto.ErrorResponse{Error: "Task action not found: " + actionName})
-		return
+	// 3. Determine the scheduled time, defaulting to now if not provided.
+	if req.ScheduledAt.IsZero() {
+		req.ScheduledAt = time.Now()
 	}
 
+	// 4. Build the core task model from the validated request data.
 	task := &dto.TaskScheduler{
 		TaskEntityID: entity.ID,
 		TaskActionID: action.ID,
-		Payload:      datatypes.JSON(req.Payload),
+		Payload:      req.Payload,
 		ScheduledAt:  req.ScheduledAt,
 		Status:       dto.StatusPending,
 	}
-
+	// Apply optional parameters if they were provided.
 	if req.MaxRetries != nil {
 		task.MaxRetries = *req.MaxRetries
 	}
@@ -65,63 +84,81 @@ func (h *TaskHandler) schedule(c *gin.Context, entityName, actionName string) {
 		task.Priority = *req.Priority
 	}
 
-	if err := h.scheduler.ScheduleTask(task); err != nil {
-		c.JSON(http.StatusInternalServerError, dto.ErrorResponse{Error: "Failed to schedule task"})
+	// 5. Determine the idempotency key.
+	// First, respect the standard 'Idempotency-Key' header if the client provides it.
+	dedupKey := c.GetHeader("Idempotency-Key")
+	if dedupKey == "" {
+		// If no header is present, generate a key automatically from the request content.
+		var temp map[string]any
+		// The best-effort key is based on the 'id' field within the payload, common for updates/deletes.
+		_ = json.Unmarshal(req.Payload, &temp)
+		if id, ok := temp["id"].(string); ok && id != "" {
+			dedupKey = fmt.Sprintf("%s:%s:%s", req.Entity, req.Action, id)
+		} else {
+			sum := sha256.Sum256(req.Payload)
+			dedupKey = fmt.Sprintf("%s:%s:%x", req.Entity, req.Action, sum)
+		}
+	}
+
+	// 6. Define TTLs for the two-stage idempotency lock.
+	const (
+		// pendingTTL is a short lock placed while the request is in-flight.
+		pendingTTL = 30 * time.Second
+		// finalTTL is the long-term lock placed after the task is successfully created.
+		finalTTL = 24 * time.Hour
+	)
+
+	// 7. Schedule the task using the idempotent repository method.
+	resp, created, inFlight, err := h.scheduler.ScheduleTask(task, dedupKey, pendingTTL, finalTTL)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, dto.ErrorResponse{Error: "Failed to schedule: " + err.Error()})
 		return
 	}
 
-	c.JSON(http.StatusAccepted, task)
-}
+	// 8. Handle the response based on the outcome of the idempotent operation.
+	switch {
+	case inFlight:
+		// Another identical request is currently reserving or finalizing.
+		// The client should wait and retry later (e.g., by polling the task ID).
+		c.JSON(http.StatusAccepted, gin.H{
+			"idempotent": true,
+			"in_flight":  true,
+			"message":    "Identical request is being processed",
+		})
+		return
 
-// ScheduleCreateProduct schedules a product creation task.
-// The payload should be a JSON object matching the dto.Product structure (without the ID).
-// Example: {"name": "New Gadget", "price": 99.99, "stock": 100}
-// @Summary      Schedule a product creation task
-// @Description  Schedules a task to create a new product at a specified time.
-// @Tags         Scheduler
-// @Accept       json
-// @Produce      json
-// @Param        task  body      ScheduleRequest  true  "Scheduling Details"
-// @Success      202   {object}  dto.TaskScheduler
-// @Failure      400   {object}  dto.ErrorResponse
-// @Failure      500   {object}  dto.ErrorResponse
-// @Router       /scheduler/products/create [post]
-func (h *TaskHandler) ScheduleCreateProduct(c *gin.Context) {
-	h.schedule(c, "PRODUCT", "CREATE")
-}
+	case created:
+		// This is the first request — the task has been created and enqueued successfully.
+		// Return HTTP 202 Accepted with task details.
+		c.JSON(http.StatusAccepted, resp)
+		return
 
-// ScheduleUpdateProduct schedules a product update task.
-// The payload should be a JSON object matching the dto.Product structure, including the ID of the product to update.
-// Example: {"id": "...", "name": "Updated Gadget", "price": 109.99}
-// @Summary      Schedule a product update task
-// @Description  Schedules a task to update an existing product at a specified time.
-// @Tags         Scheduler
-// @Accept       json
-// @Produce      json
-// @Param        task  body      ScheduleRequest  true  "Scheduling Details"
-// @Success      202   {object}  dto.TaskScheduler
-// @Failure      400   {object}  dto.ErrorResponse
-// @Failure      500   {object}  dto.ErrorResponse
-// @Router       /scheduler/products/update [post]
-func (h *TaskHandler) ScheduleUpdateProduct(c *gin.Context) {
-	h.schedule(c, "PRODUCT", "UPDATE")
-}
+	default:
+		// Duplicate request for an existing task (T:<task_id>).
+		// If the response is nil, it's likely still being prepared — respond as in-flight.
+		if resp == nil {
+			c.JSON(http.StatusAccepted, gin.H{
+				"idempotent": true,
+				"in_flight":  true,
+				"message":    "Task is being prepared",
+			})
+			return
+		}
 
-// ScheduleDeleteProduct schedules a product deletion task.
-// The payload should be a JSON object containing the ID of the product to delete.
-// Example: {"id": "..."}
-// @Summary      Schedule a product deletion task
-// @Description  Schedules a task to delete an existing product at a specified time.
-// @Tags         Scheduler
-// @Accept       json
-// @Produce      json
-// @Param        task  body      ScheduleRequest  true  "Scheduling Details"
-// @Success      202   {object}  dto.TaskScheduler
-// @Failure      400   {object}  dto.ErrorResponse
-// @Failure      500   {object}  dto.ErrorResponse
-// @Router       /scheduler/products/delete [post]
-func (h *TaskHandler) ScheduleDeleteProduct(c *gin.Context) {
-	h.schedule(c, "PRODUCT", "DELETE")
+		// If the task is in a terminal state (completed, failed, canceled) → return 200 + task details.
+		// If it's still pending/processing/retrying → return 202 Accepted with in-flight info.
+		switch resp.Status {
+		case dto.StatusCompleted, dto.StatusFailed, dto.StatusCanceled:
+			c.JSON(http.StatusOK, resp)
+		default: // pending / processing / retrying
+			c.JSON(http.StatusAccepted, gin.H{
+				"idempotent": true,
+				"in_flight":  true,
+				"task_id":    resp.ID,
+				"status":     resp.Status,
+			})
+		}
+	}
 }
 
 // GetTasks lists all scheduled tasks, with optional status filtering.

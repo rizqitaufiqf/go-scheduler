@@ -39,9 +39,7 @@ func SetupRouter(db *gorm.DB, s *repo.Scheduler) *gin.Engine {
 	schedulerRoutes := apiV1.Group("/scheduler")
 	{
 		// Schedule operations
-		schedulerRoutes.POST("/products/create", taskHandler.ScheduleCreateProduct)
-		schedulerRoutes.POST("/products/update", taskHandler.ScheduleUpdateProduct)
-		schedulerRoutes.POST("/products/delete", taskHandler.ScheduleDeleteProduct)
+		schedulerRoutes.POST("/tasks", taskHandler.ScheduleGenericTask)
 
 		// View tasks
 		schedulerRoutes.GET("/tasks", taskHandler.GetTasks)

@@ -2,7 +2,9 @@ package repository
 
 import (
 	"context"
+	"fmt"
 	"log"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -28,22 +30,62 @@ func NewScheduler(ctx context.Context, db *gorm.DB, redis *redis.Client) *Schedu
 	}
 }
 
-// ScheduleTask creates a task in PostgreSQL and adds it to the Redis sorted set.
-func (r *Scheduler) ScheduleTask(task *dto.TaskScheduler) error {
-	// 1. Save the task to PostgreSQL, our persistent source of truth.
-	if err := r.db.WithContext(r.ctx).Create(task).Error; err != nil {
-		return err
+// ScheduleTaskIdemRedis schedules a task with Redis-only idempotency.
+// Returns (resp, createdNew, inFlight, err).
+func (r *Scheduler) ScheduleTask(task *dto.TaskScheduler, dedupKey string, pendingTTL, finalTTL time.Duration) (*dto.TaskResponse, bool, bool, error) {
+	ctx, cancel := context.WithTimeout(r.ctx, 5*time.Second)
+	defer cancel()
+
+	idemKey := IdempotencyKey(dedupKey)
+	log.Println("IdemKey:", idemKey)
+	token := uuid.NewString()
+
+	// 1) Reserve idempotency key (P:<token>)
+	reserved, existing, err := ReserveIdem(ctx, r.redis, idemKey, token, pendingTTL)
+	if err != nil {
+		return nil, false, false, fmt.Errorf("idempotency reserve failed: %w", err)
+	}
+	if !reserved {
+		// Key already exists
+		if strings.HasPrefix(existing, "T:") {
+			idStr := strings.TrimPrefix(existing, "T:")
+			id, perr := uuid.Parse(idStr)
+			if perr != nil {
+				// Corrupt value; treat as not found
+				return nil, false, false, nil
+			}
+			resp, ferr := r.FindTaskByID(id)
+			return resp, false, false, ferr // duplicate; return original
+		}
+		// "P:<tokenX>" => in-flight by another request
+		return nil, false, true, nil
 	}
 
-	// 2. After successful DB commit, add the task to the Redis queue.
-	if err := r.redis.ZAdd(r.ctx, TasksQueueKey(), &redis.Z{
+	// 2) Create the task in DB (DB-first)
+	if err := r.db.WithContext(ctx).Create(task).Error; err != nil {
+		// Optional: release reservation early; or let pending TTL expire
+		_ = r.redis.Del(ctx, idemKey).Err()
+		return nil, false, false, err
+	}
+
+	// 3) Finalize idempotency to T:<taskID>
+	if err := FinalizeIdem(ctx, r.redis, idemKey, token, task.ID.String(), finalTTL); err != nil {
+		log.Printf("CRITICAL: finalizeIdem failed for %s: %v", task.ID, err)
+		// continue; not fatal
+	}
+
+	// 4) Enqueue to Redis ZSET (post-commit)
+	if rErr := r.redis.ZAdd(ctx, TasksQueueKey(), &redis.Z{
 		Score:  float64(task.ScheduledAt.Unix()),
 		Member: task.ID.String(),
-	}).Err(); err != nil {
-		// Log as critical because the task is in DB but not queued. The periodic reconciler will fix this.
-		log.Printf("CRITICAL: Failed to queue task %s in Redis after DB creation: %v", task.ID, err)
+	}).Err(); rErr != nil {
+		log.Printf("CRITICAL: Failed to queue task %s: %v", task.ID, rErr)
+		// periodic reconciler will heal it
 	}
-	return nil
+
+	// 5) Build response
+	resp, ferr := r.FindTaskByID(task.ID)
+	return resp, true, false, ferr
 }
 
 // FindTasks retrieves a list of all tasks from the database, with an optional status filter.
@@ -86,6 +128,24 @@ func (r *Scheduler) FindTaskByID(taskID uuid.UUID) (*dto.TaskResponse, error) {
 	}
 
 	return &task, nil
+}
+
+// FindEntityByName looks up a task entity by its unique name.
+func (r *Scheduler) FindEntityByName(name string) (*dto.TaskEntity, error) {
+	var entity dto.TaskEntity
+	if err := r.db.WithContext(r.ctx).Where("name = ?", name).First(&entity).Error; err != nil {
+		return nil, err // Returns gorm.ErrRecordNotFound if not found
+	}
+	return &entity, nil
+}
+
+// FindActionByName looks up a task action by its unique name.
+func (r *Scheduler) FindActionByName(name string) (*dto.TaskAction, error) {
+	var action dto.TaskAction
+	if err := r.db.WithContext(r.ctx).Where("name = ?", name).First(&action).Error; err != nil {
+		return nil, err // Returns gorm.ErrRecordNotFound if not found
+	}
+	return &action, nil
 }
 
 // PauseTask changes a task's status to 'paused' and removes it from the Redis queue.

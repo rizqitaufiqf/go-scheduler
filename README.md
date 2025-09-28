@@ -106,10 +106,12 @@ SCHEDULED_AT=$(date -d "+2 minutes" -u +"%Y-%m-%dT%H:%M:%SZ")
 # For macOS, use:
 # SCHEDULED_AT=$(date -v+2M -u +"%Y-%m-%dT%H:%M:%SZ")
 
-# Schedule the task
-curl -X POST http://localhost:8080/api/v1/scheduler/products/create \
+# Schedule a generic task
+curl -X POST http://localhost:8080/api/v1/scheduler/tasks \
 -H "Content-Type: application/json" \
 -d '{
+    "entity": "PRODUCT",
+    "action": "CREATE",
     "scheduled_at": "'"$SCHEDULED_AT"'",
     "priority": 10,
     "max_retries": 5,

@@ -128,3 +128,13 @@ type TaskResponse struct {
 	DeletedAt      gorm.DeletedAt `json:"deleted_at,omitempty"`
 	DeletedBy      uuid.NullUUID  `json:"deleted_by,omitempty"`
 }
+
+// GenericScheduleRequest defines the structure for the generic task scheduling endpoint.
+type GenericScheduleRequest struct {
+	Entity      string         `json:"entity" binding:"required" example:"PRODUCT"`
+	Action      string         `json:"action" binding:"required" example:"CREATE"`
+	Payload     datatypes.JSON `json:"payload" binding:"required" swaggertype:"object"`
+	ScheduledAt time.Time      `json:"scheduled_at" binding:"required" example:"2025-12-01T15:04:05Z"`
+	MaxRetries  *int           `json:"max_retries,omitempty" example:"5"`
+	Priority    *int           `json:"priority,omitempty" example:"10"`
+}
