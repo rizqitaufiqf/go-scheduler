@@ -28,3 +28,5 @@ docs/
 
 # macOS specific
 .DS_Store
+
+tmp

@@ -23,8 +23,11 @@ func SetupRouter(db *gorm.DB, s *repo.Scheduler) *gin.Engine {
 	// Swagger endpoint
 	r.GET("/swagger/*any", ginSwagger.WrapHandler(swaggerFiles.Handler))
 
+	// Main API group
+	apiV1 := r.Group("/api/v1")
+
 	// Group for direct product management
-	productRoutes := r.Group("/products")
+	productRoutes := apiV1.Group("/products")
 	{
 		productRoutes.POST("", productHandler.CreateProduct)
 		productRoutes.GET("", productHandler.GetProducts)
@@ -33,15 +36,21 @@ func SetupRouter(db *gorm.DB, s *repo.Scheduler) *gin.Engine {
 	}
 
 	// Group for task scheduling and viewing
-	schedulerRoutes := r.Group("/scheduler")
+	schedulerRoutes := apiV1.Group("/scheduler")
 	{
 		// Schedule operations
-		schedulerRoutes.POST("/products/create", taskHandler.ScheduleCreateProduct)
-		schedulerRoutes.POST("/products/update", taskHandler.ScheduleUpdateProduct)
-		schedulerRoutes.POST("/products/delete", taskHandler.ScheduleDeleteProduct)
+		schedulerRoutes.POST("/tasks", taskHandler.ScheduleGenericTask)
 
 		// View tasks
 		schedulerRoutes.GET("/tasks", taskHandler.GetTasks)
+		schedulerRoutes.GET("/tasks/:id", taskHandler.GetTaskByID)
+
+		// Manage task state
+		schedulerRoutes.POST("/tasks/:id/pause", taskHandler.PauseTask)
+		schedulerRoutes.POST("/tasks/:id/resume", taskHandler.ResumeTask)
+		schedulerRoutes.POST("/tasks/:id/cancel", taskHandler.CancelTask)
+		schedulerRoutes.POST("/tasks/:id/run", taskHandler.RunTaskNow)
+		schedulerRoutes.POST("/tasks/:id/retry", taskHandler.RetryFailedTask)
 	}
 
 	return r
