@@ -6,9 +6,15 @@ services:
     container_name: scheduler-app-prod
     ports:
       - "8080:8080"
+    # Menggunakan variabel lingkungan individual yang dibaca oleh config.go
     environment:
-      - REDIS_URL=${REDIS_ADDR}
-      - DATABASE_URL=postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@{POSTGRES_HOST}:{POSTGRES_PORT}/${POSTGRES_DB}
+      - POSTGRES_HOST=postgresql # Gunakan nama service sebagai host
+      - POSTGRES_PORT=${POSTGRES_PORT}
+      - POSTGRES_USER=${POSTGRES_USER}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - POSTGRES_DB=${POSTGRES_DB}
+      - REDIS_ADDR=redis:6379 # Gunakan nama service sebagai host
+      - REDIS_PASSWORD=${REDIS_PASSWORD}
       - TZ=${TZ:-UTC}
     depends_on:
       - postgresql
@@ -37,6 +43,16 @@ services:
     # You also might not expose the Redis port publicly
     # ports:
     #   - "6379:6379"
+
+  asynqmon:
+    image: hibiken/asynqmon:latest
+    container_name: scheduler-asynqmon-prod
+    # Port 8081 hanya untuk contoh. Di produksi, idealnya diakses melalui reverse proxy.
+    ports:
+      - "8081:8081"
+    command: --redis-addr=redis:6379
+    depends_on:
+      - redis
 
 volumes:
   postgres-data:

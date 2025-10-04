@@ -52,7 +52,7 @@ CREATE TABLE IF NOT EXISTS public.task_schedulers (
     task_action_id UUID NOT NULL REFERENCES public.task_actions(id) ON DELETE RESTRICT,
     payload JSONB NOT NULL,
     scheduled_at TIMESTAMPTZ NOT NULL,
-    priority INT NOT NULL DEFAULT 0,
+    priority INT NOT NULL DEFAULT 4,
     retry_count INT NOT NULL DEFAULT 0,
     max_retries INT NOT NULL DEFAULT 3,
     status VARCHAR(20) NOT NULL DEFAULT 'pending',
@@ -71,7 +71,7 @@ CREATE TABLE IF NOT EXISTS public.task_schedulers (
 -- ======================================
 -- 4) Constraints & Triggers
 -- ======================================
-ALTER TABLE public.task_schedulers ADD CONSTRAINT chk_task_schedulers_status CHECK (status IN ('pending', 'processing', 'completed', 'failed', 'canceled', 'paused', 'retrying'));
+ALTER TABLE public.task_schedulers ADD CONSTRAINT chk_task_schedulers_status CHECK (status IN ('scheduled', 'pending', 'processing', 'retrying', 'completed', 'archived', 'canceled', 'paused'));
 
 CREATE TRIGGER trg_set_updated_at_entities BEFORE UPDATE ON public.task_entities FOR EACH ROW EXECUTE FUNCTION public.update_updated_at_column();
 CREATE TRIGGER trg_set_updated_at_actions BEFORE UPDATE ON public.task_actions FOR EACH ROW EXECUTE FUNCTION public.update_updated_at_column();

@@ -1,283 +1,269 @@
-# Go Task Scheduler
+# Go Scheduler dengan Arsitektur Hibrida (PostgreSQL + Asynq)
 
-[![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
+## Ringkasan Arsitektur
 
-A robust, distributed task scheduler and worker system built with Go. This application provides a RESTful API to schedule tasks for future execution, which are then picked up and processed by a resilient background worker.
+Proyek ini mengimplementasikan sistem penjadwalan tugas (*task scheduler*) yang andal di Go dengan menggunakan **arsitektur hibrida**. Arsitektur ini menggabungkan keunggulan dari dua dunia:
 
-## Overview
+1.  **PostgreSQL sebagai *Single Source of Truth***: Semua metadata dan status tugas (seperti `scheduled`, `processing`, `completed`, `paused`) disimpan secara persisten di database. Ini memungkinkan audit trail yang lengkap, kemampuan query yang kompleks, dan jaminan integritas data.
+2.  **Asynq sebagai *Robust Task Processor***: Asynq digunakan untuk menangani eksekusi tugas, termasuk antrian prioritas, mekanisme *retry* otomatis, *concurrency control*, dan pemantauan melalui UI web (Asynqmon).
 
-The system allows for scheduling background tasks through a RESTful API. Tasks are defined by an **Entity** (e.g., `PRODUCT`) and an **Action** (e.g., `CREATE`), providing a flexible and extensible model. Scheduled tasks are stored in a PostgreSQL database for durability and queued in Redis for efficient processing by a distributed worker system.
+### Alur Kerja
 
-## Features
-
-- **RESTful API**: Schedule and manage tasks using a clean HTTP interface built with Gin.
-- **Normalized Task Model**: Tasks are defined by `Entities` and `Actions` stored in the database, preventing magic strings and allowing for easy extension.
-- **Background Worker**: A concurrent worker processes tasks from a queue, with configurable concurrency.
-- **Distributed Locking**: Uses Redis `SETNX` to ensure that a task is processed by only one worker instance at a time, making it safe to scale horizontally.
-- **Automatic Retries**: Failed tasks are automatically retried with exponential backoff, up to a configurable maximum number of attempts.
-- **Task Prioritization**: Assign priorities to tasks to ensure high-priority jobs are processed first.
-- **Resilient**: On startup, the worker reconciles tasks that may have been stuck in a `processing` state due to a previous crash, ensuring no tasks are lost.
-- **Configurable**: Worker behavior (concurrency, polling interval) can be configured via environment variables.
-- **Database-backed**: Tasks are persisted in PostgreSQL for durability and querying.
-- **Granular Statuses**: Tasks have a clear lifecycle with statuses like `pending`, `processing`, `completed`, `failed`, `paused`, and `canceled`.
-- **API Documentation**: Interactive API documentation is available via Swagger (OpenAPI).
-- **Containerized**: The entire application stack (app, database, Redis) is managed with Docker Compose for easy setup and deployment.
-
-## Tech Stack
-
-- **Language**: Go
-- **Web Framework**: Gin
-- **Database**: PostgreSQL
-- **ORM**: GORM
-- **In-Memory Store/Queue**: Redis
-- **Containerization**: Docker & Docker Compose
-- **API Documentation**: Swaggo
-
-## Getting Started
-
-### Prerequisites
-
-- Go (v1.18+ recommended)
-- Docker
-- Docker Compose
-
-### 1. Clone the Repository
-
-```sh
-git clone https://github.com/rizqitaufiqf/go-scheduler.git
-cd go-scheduler
+```
+┌─────────────┐   1. Create Task   ┌───────────────┐   2. Enqueue Task   ┌─────────────┐
+│   Client    │───────────────────▶│  PostgreSQL   │────────────────────▶│    Redis    │
+│ (API Call)  │                    │ (Source of Truth) │                     │   (Broker)  │
+└─────────────┘                    └───────┬───────┘                     └──────┬──────┘
+                                           │ 5. Update Status                  │ 3. Process Task
+                                           │                                   │
+                                           └───────────────────────────────────▼
+                                                                        ┌─────────────┐
+                                                                        │   Worker    │
+                                                                        │  (Asynq)    │
+                                                                        └─────────────┘
 ```
 
-### 2. Configure Environment Variables
+### Mekanisme Rekonsiliasi
 
-Create a `.env` file by copying the example file.
+Untuk mengatasi potensi inkonsistensi antara database dan Redis (misalnya, jika server mati setelah menyimpan ke DB tetapi sebelum *enqueue* ke Redis), sistem ini dilengkapi dengan **proses rekonsiliasi**:
+-   **Saat Startup**: Worker akan memindai tugas yang "seharusnya aktif" di DB (`pending`, `retrying`, `processing` yang macet) dan menjadwalkannya kembali ke Asynq jika tidak ditemukan di Redis.
+-   **Secara Periodik**: Tugas rekonsiliasi berjalan secara berkala untuk memastikan konsistensi jangka panjang.
 
-```sh
-cp .env.example .env
+## Struktur Direktori
+
+```plaintext
+go-scheduler/
+├── config/                 # Environment configuration loading
+├── database/               # Database and Redis initialization
+├── docs/                   # Swagger documentation files (auto-generated)
+├── dto/                    # Data Transfer Objects (for API and database models)
+├── handler/                # HTTP handlers for API endpoints
+├── repository/             # Data access logic (e.g., scheduling a task)
+├── router/                 # Gin router setup
+├── sql/                    # Init Sql
+├── task/                   # Task processing logic
+├── worker/                 # Background worker
+├── .env.example            # Example environment variables
+├── docker-compose.yml      # Docker services definition
+├── Dockerfile              # Docker build instructions for the Go app
+├── go.mod                  # Go module dependencies
+└── main.go                 # Application entrypoint
+├── USAGE_EXAMPLE.md        # Contoh penggunaan API dengan cURL
 ```
 
-Modify the `.env` file with your desired configuration. The default values are suitable for local development with the provided `docker-compose.yml`.
+## Fitur Utama Asynq
 
-### 3. Run the Application
+### 1. **Automatic Retry dengan Berbagai Strategi**
+```go
+// Exponential backoff
+asynq.MaxRetry(10)
+asynq.Timeout(5 * time.Minute)
 
-Use Docker Compose to build and run all the services (Go application, PostgreSQL, and Redis).
-
-```sh
-docker-compose up --build
+// Custom retry delay
+asynq.Retention(24 * time.Hour) // Keep completed tasks
 ```
 
-The API server will be running at `http://localhost:8080`.
+### 2. **Task Prioritization**
+```go
+// High priority queue
+client.Enqueue(task, asynq.Queue("critical"))
 
-## API Usage
+// Medium priority
+client.Enqueue(task, asynq.Queue("default"))
 
-### Interactive Documentation
+// Low priority
+client.Enqueue(task, asynq.Queue("low"))
+```
 
-Once the application is running, you can access the interactive Swagger UI to explore and test the API endpoints:
+### 3. **Scheduled & Delayed Tasks**
+```go
+// Process in 1 hour
+client.Enqueue(task, asynq.ProcessIn(1*time.Hour))
 
-**http://localhost:8080/swagger/index.html**
+// Process at specific time
+client.Enqueue(task, asynq.ProcessAt(scheduledTime))
+```
 
-### Using with Postman / Insomnia
+### 4. **Unique Tasks (Deduplication)**
+```go
+// Prevent duplicate tasks
+client.Enqueue(task, 
+    asynq.TaskID("unique-id"),
+    asynq.Unique(24*time.Hour),
+)
+```
 
-You can easily import the API collection into tools like Postman or Insomnia using the generated OpenAPI specification.
+### 5. **Task Aggregation**
+```go
+// Group similar tasks
+client.Enqueue(task, 
+    asynq.Group("product:create"),
+    asynq.Aggregation(10, 5*time.Minute), // 10 tasks or 5 min
+)
+```
 
-1.  Make sure the application is running:
-    ```sh
-    docker-compose up
-    ```
-2.  Open Postman and go to `File > Import`.
-3.  Select the **Link** tab and enter the URL to the `swagger.json` file:
-    ```
-    http://localhost:8080/swagger/swagger.json
-    ```
-4.  Click **Continue** and then **Import**.
+### 6. **Monitoring & Observability**
+- **Asynqmon**: Web UI untuk monitoring
+- **Prometheus Metrics**: Built-in metrics
+- **CLI Tools**: Inspect & manage tasks
+- **Logging**: Structured logging built-in
 
-A new collection named "Go Task Scheduler API" will be created, containing all available endpoints and their documentation. You can then use Postman to send requests and see responses.
+### 7. **Graceful Shutdown**
+```go
+// Automatically handles:
+// - Finishing in-progress tasks
+// - Returning pending tasks to queue
+// - Clean shutdown on signals
+```
 
-> **Important Note on Timezones:** When scheduling a task, always provide the `scheduled_at` timestamp in full **ISO 8601 / RFC3339 format**, including the timezone offset. For example, to schedule a task for 10:00 AM in a timezone that is 7 hours ahead of UTC, use `"2025-10-20T10:00:00+07:00"`. If you omit the offset, the time will be interpreted as UTC.
+## Perbedaan Kunci
 
-### Example: Scheduling a Task with `curl`
+### Redis Usage
 
-Here's how to schedule a task to create a new product in 2 minutes. This example uses UTC time.
+**Scheduler Custom:**
+```
+- tasks:pending (sorted set dengan score = scheduled_at)
+- task:locks:{id} (string dengan TTL)
+- Manual ZADD, ZRANGEBYSCORE, SETNX
+```
 
-```sh
-# Get a timestamp for 2 minutes from now (Linux/GNU date)
-SCHEDULED_AT=$(date -d "+2 minutes" -u +"%Y-%m-%dT%H:%M:%SZ")
+**Asynq:**
+```
+- asynq:queues:{queue} (list untuk ready tasks)
+- asynq:scheduled (sorted set dengan score = process_at)
+- asynq:retry (sorted set untuk retry)
+- asynq:archived (completed/failed tasks)
+- asynq:lease (atomic lease dengan Lua scripts)
+```
 
-# For macOS, use:
-# SCHEDULED_AT=$(date -v+2M -u +"%Y-%m-%dT%H:%M:%SZ")
+### Database Usage
 
-# Schedule a generic task
-curl -X POST http://localhost:8080/api/v1/scheduler/tasks \
--H "Content-Type: application/json" \
--d '{
-    "entity": "PRODUCT",
-    "action": "CREATE",
-    "scheduled_at": "'"$SCHEDULED_AT"'",
-    "priority": 10,
-    "max_retries": 5,
-    "payload": {
-        "name": "New Awesome Gadget",
-        "price": 199.99,
-        "stock": 50
+**Scheduler Custom:**
+- Database sebagai single source of truth
+- Redis untuk queueing
+- Perlu reconciliation logic
+
+**Asynq:**
+- Redis sebagai source of truth
+- Database opsional (untuk audit/reporting)
+- Tidak perlu reconciliation
+
+### Failure Handling
+
+**Scheduler Custom:**
+```go
+// Manual retry logic
+if task.Attempt < task.MaxRetries {
+    nextDelay := calculateBackoff(task.Attempt)
+    task.ScheduledAt = time.Now().Add(nextDelay)
+    task.Status = "retrying"
+    // Enqueue ke Redis
+}
+```
+
+**Asynq:**
+```go
+// Built-in retry dengan error handling
+func ProcessTask(ctx context.Context, t *asynq.Task) error {
+    if err := doWork(); err != nil {
+        return err // Asynq handles retry automatically
     }
-}'
+    return nil
+}
 ```
 
-You will see the worker logs in your `docker-compose` output when the task is picked up and processed.
+## Kelebihan Asynq
 
-### Viewing Tasks
+### ✅ Pros
+1. **Production-ready**: Battle-tested, digunakan banyak perusahaan
+2. **Less code**: Tidak perlu implement worker pool, locking, retry logic
+3. **Better tooling**: Web UI, CLI, metrics out of the box
+4. **Advanced features**: Aggregation, rate limiting, unique tasks
+5. **Active development**: Regular updates & bug fixes
+6. **Good documentation**: Comprehensive docs & examples
+7. **Atomic operations**: Lua scripts untuk consistency
+8. **Graceful shutdown**: Handle signals properly
 
-You can view all scheduled tasks and their statuses:
+### ⚠️ Cons
+1. **Redis-centric**: Redis adalah single source of truth
+2. **Less flexibility**: Terikat dengan Asynq patterns
+3. **Learning curve**: Perlu pelajari Asynq conventions
+4. **Opinionated**: Struktur data & flow sudah defined
 
-```sh
-curl http://localhost:8080/api/v1/scheduler/tasks
-```
+## Kelebihan Scheduler Custom Anda
 
-## Project Structure
+### ✅ Pros
+1. **Database-centric**: PostgreSQL sebagai source of truth
+2. **Full control**: Bisa customize setiap aspek
+3. **Flexible schema**: Bisa tambah field custom
+4. **Query capability**: Bisa query tasks kompleks di DB
+5. **Audit trail**: History lengkap di database
+6. **Custom logic**: Bisa implement business rules spesifik
 
-```
-├── config/         # Environment configuration loading
-├── database/       # Database and Redis initialization
-├── docs/           # Swagger documentation files (auto-generated)
-├── dto/            # Data Transfer Objects (for API and database models)
-├── handler/        # HTTP handlers for API endpoints
-├── repository/     # Data access logic (e.g., scheduling a task)
-├── router/         # Gin router setup
-├── worker/         # Background worker and task processing logic
-├── .env.example    # Example environment variables
-├── docker-compose.yml # Docker services definition
-├── Dockerfile      # Docker build instructions for the Go app
-├── go.mod          # Go module dependencies
-└── main.go         # Application entrypoint
-```
+### ⚠️ Cons
+1. **More maintenance**: Perlu maintain worker logic sendiri
+2. **More code**: Lebih banyak boilerplate
+3. **Testing complexity**: Perlu test edge cases sendiri
+4. **No built-in monitoring**: Perlu build sendiri
+5. **Reconciliation needed**: Perlu handle crash recovery
 
-## Configuration
+## Rekomendasi
 
-The following environment variables can be set in the `.env` file:
+### Gunakan **Scheduler Custom** jika:
+- Perlu database sebagai source of truth
+- Butuh query capability kompleks
+- Butuh audit trail lengkap di database
+- Perlu custom business logic yang kompleks
+- Team sudah familiar dengan codebase
 
-| Variable                       | Description                                       | Default |
-| ------------------------------ | ------------------------------------------------- | ------- |
-| `POSTGRES_USER`                     | PostgreSQL username.                              | `user`    |
-| `POSTGRES_PASSWORD`                 | PostgreSQL password.                              | `password`  |
-| `POSTGRES_DB`                       | PostgreSQL database name.                         | `scheduler_db`|
-| `POSTGRES_HOST`                     | Hostname for the PostgreSQL server.               | `postgresql`|
-| `POSTG_PORT`                     | Port for the PostgreSQL server.                   | `5432`    |
-| `REDIS_ADDR`                        | Address for the Redis server.                     | `redis:6379`|
-| `TZ`                                | Timezone for the application.                     | `Asia/Jakarta`|
-| `WORKER_CONCURRENCY`                | Max number of tasks the worker can run at once.   | `10`      |
-| `WORKER_POLL_INTERVAL_SECONDS`      | How often (in seconds) the worker polls for tasks. | `10`      |
-| `LOCK_TTL_SECONDS`                  | Duration (in seconds) a task lock is held.        | `300`     |
-| `PERIODIC_RECON_INTERVAL_SECONDS` | How often (in seconds) the self-healing runs.   | `300`     |
-| `BACKOFF_BASE_DELAY_SECONDS`        | The base delay for the first retry attempt.       | `5`       |
-| `BACKOFF_MAX_DELAY_SECONDS`         | The maximum delay between any two retry attempts. | `300`     |
+### Gunakan **Asynq** jika:
+- Ingin solution yang battle-tested
+- Perlu monitoring & observability out of the box
+- Ingin less maintenance overhead
+- Butuh advanced features (aggregation, rate limiting)
+- Starting new project
+- Team kecil dengan limited resources
 
-# 🧭 Daftar Status & Transisi Task
+## Migration Path
 
-Dokumentasi ini menjelaskan status-status task, penyimpanan di Redis, alur status, serta transisi status yang diizinkan dalam sistem penjadwalan dan eksekusi task.
+Jika ingin migrate dari custom ke Asynq:
 
----
+1. **Hybrid Approach**: 
+   - Keep database untuk audit
+   - Use Asynq untuk processing
+   - Sync status dari Asynq ke database
 
-## 📌 Daftar Status Task
+2. **Gradual Migration**:
+   - Start dengan task types baru di Asynq
+   - Legacy tasks tetap di custom scheduler
+   - Migrate gradually
 
-| Status | Peran / Makna | Ada di Redis? | Diubah oleh |
-| ------------ | -------------------------------------------------------------------------------------------------------------------------- | ------------- | ----------------------------- |
-| `pending` | Task dijadwalkan & menunggu waktu `ScheduledAt` untuk dijalankan. | ✅ Ya | API / Scheduler / Reconciler |
-| `paused` | Task dibekukan secara manual oleh admin/user. Tidak dieksekusi sampai di-*resume*. | ❌ Tidak | Admin/User |
-| `retrying` | Task gagal → dijadwalkan ulang untuk attempt berikutnya sesuai `ScheduledAt` (hasil backoff), atau manual retry (score 0). | ✅ Ya | Worker / Admin (manual retry) |
-| `processing` | Task sedang dikerjakan worker. | ❌ Tidak | Worker |
-| `completed` | Task selesai sukses. Terminal. | ❌ Tidak | Worker |
-| `failed` | Task gagal permanen setelah kehabisan retry. Terminal. | ❌ Tidak | Worker |
-| `canceled` | Task dibatalkan sebelum dijalankan (dari pending, paused, atau retrying). Terminal. | ❌ Tidak | Admin/User |
+3. **Full Migration**:
+   - Move semua task processing ke Asynq
+   - Use database hanya untuk reporting
+   - Implement event sourcing jika perlu audit
 
----
+## Setup Instructions
 
-## 📝 Alur Status
+Lihat file-file implementasi berikut:
+- `main.go` - Entry point
+- `tasks/client.go` - Asynq client setup
+- `worker/server.go` - Asynq server setup
+- `tasks/processor.go` - Task processors
+- `handler/task_handler.go` - API handlers
 
-### 🟢 Alur Normal
+## Resources
 
-```
-pending → processing → completed
-```
+- Asynq Documentation: https://github.com/hibiken/asynq
+- Asynqmon (Web UI): https://github.com/hibiken/asynqmon
+- Examples: https://github.com/hibiken/asynq/tree/master/examples
 
-### 🔁 Alur Retry Otomatis
+## Kesimpulan
 
-```
-processing (gagal) → retrying (ScheduledAt baru)
-            ↓ (waktu retry tercapai)
-processing (ulang) → ... → completed / failed
-```
+Kedua approach punya kelebihan masing-masing. Custom scheduler memberikan flexibility & control penuh, sementara Asynq memberikan production-ready solution dengan less code & better tooling.
 
-### ✋ Pause / Resume
-
-```
-pending → paused → pending → processing
-```
-
-### 🚫 Cancel
-
-```
-(pending | paused | retrying) → canceled
-```
-
-### 🔄 Manual Retry (dari failed)
-
-```
-failed → retrying (score 0) → processing ...
-```
-
-### 🧰 Reconcile (Crash Recovery Startup)
-
-```
-processing (stuck karena crash) → pending (by system)
-↓
-Redis enqueue ulang
-↓
-processing (dijalankan ulang)
-```
-
-### 🧠 Catatan Teknis Penting
-
-- Redis queue hanya berisi task `pending` dan `retrying`.
-- Worker hanya mengeksekusi task dengan status `pending` atau `retrying`.
-- Transisi `processing → pending`  **hanya dilakukan oleh system saat proses reconcile di startup**, bukan bagian dari flow normal.
--  `retrying` berperan sebagai state “penjadwalan ulang”, **tidak perlu berubah ke `pending`**. Worker langsung memproses task `retrying` saat waktunya tiba.
-- Terminal states (`completed`, `failed`, `canceled`) **tidak dapat diubah lagi**.
-
----
-
-## 🔄 Transisi Status yang Diizinkan
-
-| Dari Status | Ke Status | Pelaku | Keterangan |
-| ------------ | ------------ | ----------------------- | ----------------------------------------------------------------------- |
-| `pending` | `processing` | Worker | Worker mengeksekusi saat waktunya tiba. |
-| `processing` | `completed` | Worker | Task sukses. |
-| `processing` | `retrying` | Worker | Task gagal, masih bisa di-retry → set ScheduledAt baru & enqueue ulang. |
-| `processing` | `failed` | Worker | Task gagal & sudah mencapai MaxRetries. |
-| `pending` | `paused` | Admin/User | Task dibekukan manual (ZREM). |
-| `paused` | `pending` | Admin/User | Task diaktifkan kembali (ZADD dengan ScheduledAt). |
-| `pending` | `canceled` | Admin/User | Task dibatalkan sebelum dijalankan. |
-| `retrying` | `processing` | Worker | Task diambil worker saat ScheduledAt retry tercapai. |
-| `retrying` | `canceled` | Admin/User | Task dibatalkan sebelum attempt berikutnya. |
-| `failed` | `retrying` | Admin/User | Manual retry now → masukkan antrean dengan score 0. |
-| `paused` | `canceled` | Admin/User | Task dibatalkan saat sedang paused. |
-| `processing` | `pending` | **System (Reconciler)** | Saat startup crash recovery → task “nyangkut” dipindah ke antrean lagi. |
-
----
-
-## 🚫 Transisi yang Tidak Diizinkan
-
-| Dari Status | Ke Status (Tidak Diizinkan) | Alasan |
-| --------------------------------- | --------------------------- | ------------------------------------------------------------------------- |
-| `retrying` | `pending` | Tidak ada langkah ini di flow normal — worker langsung proses `retrying`. |
-| `processing` | `paused` / `canceled` | Tidak ada mekanisme soft-interrupt. |
-| `completed`, `failed`, `canceled` | ke status lain | Terminal states, tidak boleh diubah lagi. |
-
----
-
-> ✨ **Catatan:**
->  - Terminal state = `completed`, `failed`, dan `canceled`. Setelah masuk ke status ini, task tidak boleh lagi diubah statusnya.
->  - Transisi status digunakan untuk menjaga konsistensi antara antrean Redis dan eksekusi worker.
-
-## License
-
-This project is licensed under the Apache 2.0 License. See the LICENSE file for details.
+Pilihan tergantung pada:
+- Requirements spesifik project
+- Team size & expertise
+- Maintenance capacity
+- Timeline & budget

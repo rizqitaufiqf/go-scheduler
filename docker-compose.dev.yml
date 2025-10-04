@@ -1,69 +1,109 @@
 services:
-  app:
-    build:
+  api:
+    build: 
       context: .
       dockerfile: Dockerfile.dev
-    container_name: scheduler-app-dev
+    container_name: go-scheduler-api
     ports:
       - "8080:8080"
     volumes:
       # Mount local source code into the container for hot-reloading
       - .:/app
     environment:
-      - REDIS_URL=${REDIS_ADDR}
-      - DATABASE_URL=postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@{POSTGRES_HOST}:{POSTGRES_PORT}/${POSTGRES_DB}
-      - TZ=${TZ:-UTC}
-    depends_on:
-      - postgresql
-      - redis
-
-  postgresql:
-    image: postgres:13-alpine
-    environment:
-      - POSTGRES_HOST=${POSTGRES_HOST}
-      - POSTGRES_PORT=${POSTGRES_PORT}
       - POSTGRES_USER=${POSTGRES_USER}
       - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
       - POSTGRES_DB=${POSTGRES_DB}
-      - TZ=${TZ:-UTC}
+      - POSTGRES_HOST=postgresql
+      - POSTGRES_PORT=5432
+      - REDIS_ADDR=redis:6379
+      - TZ=${TZ}
+      - WORKER_CONCURRENCY=${WORKER_CONCURRENCY}
+      - MAX_RETRY=${MAX_RETRY}
+      - TASK_TIMEOUT_SECONDS=${TASK_TIMEOUT_SECONDS}
+      - TASK_RETENTION_HOURS=${TASK_RETENTION_HOURS}
+    depends_on:
+      - postgresql
+      - redis
+    restart: unless-stopped
+    # The `air` command is the entrypoint. We pass arguments to our Go app after the `--` separator.
+    # This tells air to run: `go build ... && ./tmp/main --role server`
+    command: ["air", "-c", ".air.toml", "--", "--role", "server"]
+    networks:
+      - scheduler-network
+
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    container_name: go-scheduler-worker
     volumes:
-      - ./sql/init.sql:/docker-entrypoint-initdb.d/init.sql
-      - postgres-data:/var/lib/postgresql/data
+      # Mount local source code into the container for hot-reloading
+      - .:/app
+    environment:
+      - POSTGRES_USER=${POSTGRES_USER}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - POSTGRES_DB=${POSTGRES_DB}
+      - POSTGRES_HOST=postgresql
+      - POSTGRES_PORT=5432
+      - REDIS_ADDR=redis:6379
+      - TZ=${TZ}
+      - WORKER_CONCURRENCY=${WORKER_CONCURRENCY}
+    depends_on:
+      - postgresql
+      - redis
+    restart: unless-stopped
+    # Run this container as the worker
+    command: ["air", "-c", ".air.toml", "--", "--role", "worker"]
+    networks:
+      - scheduler-network
+
+  postgresql:
+    image: postgres:15-alpine
+    container_name: scheduler-postgres
+    environment:
+      - POSTGRES_USER=${POSTGRES_USER}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - POSTGRES_DB=${POSTGRES_DB}
+      - TZ=${TZ}
     ports:
       - "5432:5432"
+    volumes:
+      - ./sql/init.sql:/docker-entrypoint-initdb.d/init.sql # Menjalankan script SQL saat DB pertama kali dibuat
+      - postgres-data:/var/lib/postgresql/data # Menyimpan data DB secara persisten
+    restart: unless-stopped
+    networks:
+      - scheduler-network
 
   redis:
-    image: redis:6-alpine
-    environment:
-      - TZ=${TZ:-UTC}
+    image: redis:7-alpine
+    container_name: scheduler-redis
     ports:
       - "6379:6379"
+    volumes:
+      - redis-data:/data
+    command: redis-server --appendonly yes
+    restart: unless-stopped
+    networks:
+      - scheduler-network
 
-  # pgadmin:
-  #   image: dpage/pgadmin4:latest
-  #   container_name: pgadmin-dev
-  #   environment:
-  #     - PGADMIN_DEFAULT_EMAIL=admin@example.com
-  #     - PGADMIN_DEFAULT_PASSWORD=admin
-  #     - TZ=${TZ:-UTC}
-  #   ports:
-  #     - "5050:80"
-  #   depends_on:
-  #     - postgresql
-  #   volumes:
-  #     - pgadmin-data:/var/lib/pgadmin
-
-  # redisinsight:
-  #   image: redislabs/redisinsight:latest
-  #   container_name: redisinsight-dev
-  #   environment:
-  #     - TZ=${TZ:-UTC}
-  #   ports:
-  #     - "8001:8001"
-  #   volumes:
-  #     - redisinsight-data:/db
+  # Asynqmon - Web UI for monitoring Asynq tasks
+  asynqmon:
+    image: hibiken/asynqmon:latest
+    container_name: asynqmon
+    ports:
+      - "8081:8080"
+    environment:
+      - REDIS_ADDR=redis:6379
+    depends_on:
+      - redis
+    restart: unless-stopped
+    networks:
+      - scheduler-network
 
 volumes:
   postgres-data:
-  pgadmin-data:
-  redisinsight-data:
+  redis-data:
+
+networks:
+  scheduler-network:
+    driver: bridge

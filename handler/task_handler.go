@@ -1,379 +1,606 @@
 package handler
 
 import (
-	"crypto/sha256"
-	"encoding/json"
-	"fmt"
+	"errors"
+	"log"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
-	dto "github.com/rizqitaufiqf/go-scheduler/dto"
-	repo "github.com/rizqitaufiqf/go-scheduler/repository"
+	"github.com/hibiken/asynq"
+	"github.com/rizqitaufiqf/go-scheduler/config"
+	"github.com/rizqitaufiqf/go-scheduler/dto"
+	"github.com/rizqitaufiqf/go-scheduler/repository"
+	"github.com/rizqitaufiqf/go-scheduler/tasks"
 	"gorm.io/gorm"
 )
 
 type TaskHandler struct {
-	db        *gorm.DB
-	scheduler *repo.Scheduler
+	client   *tasks.Client
+	taskRepo repository.TaskRepository
+	cfg      *config.Config
 }
 
-func NewTaskHandler(db *gorm.DB, s *repo.Scheduler) *TaskHandler {
-	return &TaskHandler{db: db, scheduler: s}
+func NewTaskHandler(client *tasks.Client, db *gorm.DB, cfg *config.Config) *TaskHandler {
+	return &TaskHandler{
+		client:   client,
+		taskRepo: repository.NewTaskRepository(db),
+		cfg:      cfg,
+	}
 }
 
-// ScheduleGenericTask schedules any valid task based on the provided entity and action names.
-// @Summary      Schedule a generic task
-// @Description  Schedules any valid task by providing entity, action, and payload in the request body.
-// @Tags         Scheduler
-// @Accept       json
-// @Produce      json
-// @Param        task  body      dto.GenericScheduleRequest  true  "Generic Task Scheduling Details"
-// @Success      202   {object}  dto.TaskScheduler
-// @Failure      400   {object}  dto.ErrorResponse
-// @Failure      404   {object}  dto.ErrorResponse "If entity or action is not found"
-// @Failure      500   {object}  dto.ErrorResponse
-// @Router       /scheduler/tasks [post]
-func (h *TaskHandler) ScheduleGenericTask(c *gin.Context) {
-	var req dto.GenericScheduleRequest
-	// 1. Bind and validate the incoming JSON request against the DTO.
+// ScheduleTask schedules a new task
+// @Summary Schedule a new task
+// @Description Schedule a task for future execution
+// @Tags tasks
+// @Accept json
+// @Produce json
+// @Param task body dto.ScheduleTaskRequest true "Task details"
+// @Success 201 {object} dto.TaskResponse
+// @Failure 400 {object} dto.ErrorResponse
+// @Failure 500 {object} dto.ErrorResponse
+// @Router /scheduler/tasks [post]
+func (h *TaskHandler) ScheduleTask(c *gin.Context) {
+	var req dto.ScheduleTaskRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, dto.ErrorResponse{Error: err.Error()})
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
 
-	// Validate entity & action from master tables
-	entity, err := h.scheduler.FindEntityByName(req.Entity)
+	// Set default priority if not provided
+	if req.Priority == "" {
+		req.Priority = "default"
+	}
+
+	// Validate that the queue (priority) exists in the worker's config
+	priority, ok := h.cfg.Queues[req.Priority]
+	if !ok {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid priority: queue does not exist"})
+		return
+	}
+
+	// 1. Validate Entity and Action against the database
+	entity, err := h.taskRepo.FindEntityByName(c.Request.Context(), req.Entity)
 	if err != nil {
-		if err == gorm.ErrRecordNotFound {
-			c.JSON(http.StatusNotFound, dto.ErrorResponse{Error: "Task entity not found: " + req.Entity})
-			return
-		}
-		c.JSON(http.StatusInternalServerError, dto.ErrorResponse{Error: "Failed to validate entity: " + err.Error()})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid entity type"})
 		return
 	}
-	action, err := h.scheduler.FindActionByName(req.Action)
+	action, err := h.taskRepo.FindActionByName(c.Request.Context(), req.Action)
 	if err != nil {
-		if err == gorm.ErrRecordNotFound {
-			c.JSON(http.StatusNotFound, dto.ErrorResponse{Error: "Task action not found: " + req.Action})
-			return
-		}
-		c.JSON(http.StatusInternalServerError, dto.ErrorResponse{Error: "Failed to validate action: " + err.Error()})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid action type"})
 		return
 	}
 
-	// 3. Determine the scheduled time, defaulting to now if not provided.
-	if req.ScheduledAt.IsZero() {
-		req.ScheduledAt = time.Now()
+	// Parse scheduled time
+	scheduledAt, err := time.Parse(time.RFC3339, req.ScheduledAt)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid scheduled_at format"})
+		return
 	}
 
-	// 4. Build the core task model from the validated request data.
-	task := &dto.TaskScheduler{
+	// Generate one UUID to be used for both DB and Asynq Task ID
+	taskID := uuid.New()
+
+	// 2. Create the record in `task_schedulers` table first
+	dbTask := &dto.TaskScheduler{
+		ID:           taskID, // Use the pre-generated UUID
 		TaskEntityID: entity.ID,
 		TaskActionID: action.ID,
 		Payload:      req.Payload,
-		ScheduledAt:  req.ScheduledAt,
+		ScheduledAt:  scheduledAt,
+		MaxRetries:   req.MaxRetries,
+		Status:       dto.StatusScheduled, // Set status to scheduled
+		Priority:     priority,
+	}
+
+	if err := h.taskRepo.CreateTask(c.Request.Context(), dbTask); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to save task to database", "details": err.Error()})
+		return
+	}
+
+	// Build task type from entity and action
+	taskType := req.Entity + ":" + req.Action
+
+	// Prepare options
+	opts := []asynq.Option{
+		asynq.MaxRetry(req.MaxRetries),
+		asynq.Queue(req.Priority),
+		asynq.TaskID(taskID.String()), // Explicitly set Asynq Task ID
+		asynq.Timeout(5 * time.Minute),
+	}
+
+	// 3. Enqueue the task to Asynq.
+	asynqPayload := make(map[string]interface{})
+	for k, v := range req.Payload {
+		asynqPayload[k] = v
+	}
+
+	info, err := h.client.ScheduleTask(taskType, asynqPayload, scheduledAt, opts...)
+	if err != nil {
+		// Optional: Rollback or mark the DB task as failed if enqueue fails
+		// For now, we just return an error. A more robust solution could involve
+		// updating the dbTask status to 'failed_to_enqueue'.
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusCreated, dto.CreateTaskResponse{
+		ID:          info.ID,
+		DatabaseID:  dbTask.ID,
+		Type:        info.Type,
+		Queue:       info.Queue,
+		Status:      info.State.String(),
+		StatusInDB:  string(dbTask.Status),
+		MaxRetries:  info.MaxRetry,
+		Retried:     info.Retried,
+		ScheduledAt: info.NextProcessAt,
+	})
+}
+
+// EnqueueTask enqueues a task for immediate execution
+// @Summary Enqueue a task immediately
+// @Description Enqueue a task for immediate processing
+// @Tags tasks
+// @Accept json
+// @Produce json
+// @Param task body dto.EnqueueTaskRequest true "Task details"
+// @Success 201 {object} dto.TaskResponse
+// @Failure 400 {object} dto.ErrorResponse
+// @Failure 500 {object} dto.ErrorResponse
+// @Router /scheduler/tasks/enqueue [post]
+func (h *TaskHandler) EnqueueTask(c *gin.Context) {
+	var req dto.EnqueueTaskRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	// Set default priority if not provided
+	if req.Priority == "" {
+		req.Priority = "default"
+	}
+
+	// Validate that the queue (priority) exists in the worker's config
+	priority, ok := h.cfg.Queues[req.Priority]
+	if !ok {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid priority: queue does not exist"})
+		return
+	}
+
+	// 1. Validate Entity and Action
+	entity, err := h.taskRepo.FindEntityByName(c.Request.Context(), req.Entity)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid entity type"})
+		return
+	}
+	action, err := h.taskRepo.FindActionByName(c.Request.Context(), req.Action)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid action type"})
+		return
+	}
+
+	// Generate one UUID to be used for both DB and Asynq Task ID
+	taskID := uuid.New()
+
+	// 2. Create the record in `task_schedulers` table
+	dbTask := &dto.TaskScheduler{
+		ID:           taskID, // Use the pre-generated UUID
+		TaskEntityID: entity.ID,
+		TaskActionID: action.ID,
+		Payload:      req.Payload,
+		ScheduledAt:  time.Now(), // Enqueue immediately
+		MaxRetries:   req.MaxRetries,
 		Status:       dto.StatusPending,
-	}
-	// Apply optional parameters if they were provided.
-	if req.MaxRetries != nil {
-		task.MaxRetries = *req.MaxRetries
-	}
-	if req.Priority != nil {
-		task.Priority = *req.Priority
+		Priority:     priority,
 	}
 
-	// 5. Determine the idempotency key.
-	// First, respect the standard 'Idempotency-Key' header if the client provides it.
-	dedupKey := c.GetHeader("Idempotency-Key")
-	if dedupKey == "" {
-		// If no header is present, generate a key automatically from the request content.
-		var temp map[string]any
-		// The best-effort key is based on the 'id' field within the payload, common for updates/deletes.
-		_ = json.Unmarshal(req.Payload, &temp)
-		if id, ok := temp["id"].(string); ok && id != "" {
-			dedupKey = fmt.Sprintf("%s:%s:%s", req.Entity, req.Action, id)
-		} else {
-			sum := sha256.Sum256(req.Payload)
-			dedupKey = fmt.Sprintf("%s:%s:%x", req.Entity, req.Action, sum)
-		}
+	if err := h.taskRepo.CreateTask(c.Request.Context(), dbTask); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to save task to database", "details": err.Error()})
+		return
 	}
 
-	// 6. Define TTLs for the two-stage idempotency lock.
-	const (
-		// pendingTTL is a short lock placed while the request is in-flight.
-		pendingTTL = 30 * time.Second
-		// finalTTL is the long-term lock placed after the task is successfully created.
-		finalTTL = 24 * time.Hour
-	)
+	// Build task type
+	taskType := req.Entity + ":" + req.Action
 
-	// 7. Schedule the task using the idempotent repository method.
-	resp, created, inFlight, err := h.scheduler.ScheduleTask(task, dedupKey, pendingTTL, finalTTL)
+	// Prepare options
+	opts := []asynq.Option{
+		asynq.MaxRetry(req.MaxRetries),
+		asynq.Queue(req.Priority),
+		asynq.TaskID(taskID.String()), // Explicitly set Asynq Task ID
+	}
+
+	// 3. Enqueue to Asynq.
+	// We no longer need to pass db_task_id in the payload.
+	// Create a copy of the payload to avoid mutating the original request data.
+	asynqPayload := make(map[string]interface{})
+	for k, v := range req.Payload {
+		asynqPayload[k] = v
+	}
+
+	info, err := h.client.EnqueueTask(taskType, asynqPayload, opts...)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, dto.ErrorResponse{Error: "Failed to schedule: " + err.Error()})
+		// Optional: Rollback or mark the DB task as failed
+		// For now, we just return an error.
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
 
-	// 8. Handle the response based on the outcome of the idempotent operation.
-	switch {
-	case inFlight:
-		// Another identical request is currently reserving or finalizing.
-		// The client should wait and retry later (e.g., by polling the task ID).
-		c.JSON(http.StatusAccepted, gin.H{
-			"idempotent": true,
-			"in_flight":  true,
-			"message":    "Identical request is being processed",
-		})
-		return
+	c.JSON(http.StatusCreated, dto.CreateTaskResponse{
+		ID:          info.ID,
+		DatabaseID:  dbTask.ID,
+		Type:        info.Type,
+		Queue:       info.Queue,
+		Status:      info.State.String(),
+		StatusInDB:  string(dbTask.Status),
+		MaxRetries:  info.MaxRetry,
+		Retried:     info.Retried,
+		ScheduledAt: info.NextProcessAt, // Include scheduled time for consistency
+	})
+}
 
-	case created:
-		// This is the first request — the task has been created and enqueued successfully.
-		// Return HTTP 202 Accepted with task details.
-		c.JSON(http.StatusAccepted, resp)
-		return
+// GetTask retrieves task information
+// @Summary Get task information
+// @Description Get detailed information about a task
+// @Tags tasks
+// @Produce json
+// @Param id path string true "Task ID"
+// @Success 200 {object} dto.TaskResponse
+// @Failure 404 {object} dto.ErrorResponse
+// @Router /scheduler/tasks/{id} [get]
+func (h *TaskHandler) GetTask(c *gin.Context) {
+	taskID := c.Param("id")
 
+	// 1. Find the task in the database to get its queue.
+	dbTask, err := h.taskRepo.FindTaskByTaskID(c.Request.Context(), taskID)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "task not found in database"})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to find task in database", "details": err.Error()})
+		return
+	}
+	queue := h.getQueueNameFromPriority(dbTask.Priority)
+
+	info, err := h.client.GetTaskInfo(queue, taskID)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "task not found"})
+		return
+	}
+
+	c.JSON(http.StatusOK, dto.TaskResponse{
+		ID:          info.ID,
+		Type:        info.Type,
+		Queue:       info.Queue,
+		Status:      info.State.String(),
+		MaxRetries:  info.MaxRetry,
+		Retried:     info.Retried,
+		ScheduledAt: info.NextProcessAt,
+	})
+}
+
+// ListTasks lists tasks by status
+// @Summary List tasks
+// @Description List tasks filtered by queue and status
+// @Tags tasks
+// @Produce json
+// @Param queue query string false "Queue name"
+// @Param status query string false "Task status (pending, scheduled, retry, archived)"
+// @Param page query int false "Page number" default(1)
+// @Param page_size query int false "Page size" default(20)
+// @Success 200 {object} dto.TaskListResponse
+// @Failure 400 {object} dto.ErrorResponse
+// @Failure 500 {object} dto.ErrorResponse
+// @Router /scheduler/tasks [get]
+func (h *TaskHandler) ListTasks(c *gin.Context) {
+	// NOTE: This implementation lists tasks directly from Redis via Asynq's inspector.
+	// This is great for real-time status but is limited to what the inspector provides.
+	// An alternative approach is to query the `task_schedulers` table in your PostgreSQL database.
+	// Querying the database would allow for more complex filtering, sorting, and joining with other tables (e.g., `task_entities`),
+	// providing a richer, albeit potentially slightly delayed, view of the tasks.
+	queue := c.DefaultQuery("queue", "default")
+	status := c.DefaultQuery("status", string(dto.StatusPending))
+	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
+	pageSize, _ := strconv.Atoi(c.DefaultQuery("page_size", "20"))
+
+	var taskInfos []*asynq.TaskInfo
+	var err error
+
+	switch status {
+	case string(dto.StatusPending):
+		taskInfos, err = h.client.ListPendingTasks(queue, pageSize, page)
+	case string(dto.StatusScheduled):
+		taskInfos, err = h.client.ListScheduledTasks(queue, pageSize, page)
+	case string(dto.StatusRetrying):
+		taskInfos, err = h.client.ListRetryTasks(queue, pageSize, page)
+	case string(dto.StatusArchived):
+		taskInfos, err = h.client.ListArchivedTasks(queue, pageSize, page)
+	case string(dto.StatusCompleted):
+		taskInfos, err = h.client.ListCompletedTasks(queue, pageSize, page)
 	default:
-		// Duplicate request for an existing task (T:<task_id>).
-		// If the response is nil, it's likely still being prepared — respond as in-flight.
-		if resp == nil {
-			c.JSON(http.StatusAccepted, gin.H{
-				"idempotent": true,
-				"in_flight":  true,
-				"message":    "Task is being prepared",
-			})
-			return
-		}
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid status"})
+		return
+	}
 
-		// If the task is in a terminal state (completed, failed, canceled) → return 200 + task details.
-		// If it's still pending/processing/retrying → return 202 Accepted with in-flight info.
-		switch resp.Status {
-		case dto.StatusCompleted, dto.StatusFailed, dto.StatusCanceled:
-			c.JSON(http.StatusOK, resp)
-		default: // pending / processing / retrying
-			c.JSON(http.StatusAccepted, gin.H{
-				"idempotent": true,
-				"in_flight":  true,
-				"task_id":    resp.ID,
-				"status":     resp.Status,
-			})
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	tasks := make([]dto.TaskResponse, len(taskInfos))
+	for i, info := range taskInfos {
+		tasks[i] = dto.TaskResponse{
+			ID:          info.ID,
+			Type:        info.Type,
+			Queue:       info.Queue,
+			Status:      info.State.String(),
+			MaxRetries:  info.MaxRetry,
+			Retried:     info.Retried,
+			ScheduledAt: info.NextProcessAt,
 		}
 	}
+
+	c.JSON(http.StatusOK, dto.TaskListResponse{
+		Tasks: tasks,
+		Page:  page,
+		Size:  pageSize,
+		Total: len(tasks),
+	})
 }
 
-// GetTasks lists all scheduled tasks, with optional status filtering.
-// @Summary      List all scheduled tasks
-// @Description  Gets a list of all tasks, with an optional filter by status.
-// @Tags         Scheduler
-// @Produce      json
-// @Param        status  query     string  false  "Filter tasks by status"  Enums(pending, processing, completed, failed, canceled, paused)
-// @Success      200     {array}   dto.TaskResponse
-// @Failure      400     {object}  dto.ErrorResponse
-// @Failure      500     {object}  dto.ErrorResponse
-// @Router       /scheduler/tasks [get]
-func (h *TaskHandler) GetTasks(c *gin.Context) {
-	status := c.Query("status")
-
-	if status != "" {
-		switch dto.TaskStatus(status) {
-		case dto.StatusPending, dto.StatusProcessing, dto.StatusCompleted, dto.StatusFailed, dto.StatusCanceled, dto.StatusPaused, dto.StatusRetrying:
-			// Status is valid, proceed.
-		default:
-			c.JSON(http.StatusBadRequest, dto.ErrorResponse{Error: "Invalid status query parameter."})
-			return
-		}
-	}
-
-	tasks, err := h.scheduler.FindTasks(status)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, dto.ErrorResponse{Error: "Failed to retrieve tasks"})
-		return
-	}
-
-	c.JSON(http.StatusOK, tasks)
-}
-
-// GetTaskByID retrieves a single task by its ID.
-// @Summary      Get a single task
-// @Description  Gets the full details of a single scheduled task by its ID.
-// @Tags         Scheduler
-// @Produce      json
-// @Param        id   path      string  true  "Task ID (UUID)"
-// @Success      200  {object}  dto.TaskResponse
-// @Failure      400  {object}  dto.ErrorResponse
-// @Failure      404  {object}  dto.ErrorResponse "Task not found"
-// @Failure      500  {object}  dto.ErrorResponse
-// @Router       /scheduler/tasks/{id} [get]
-func (h *TaskHandler) GetTaskByID(c *gin.Context) {
-	id, err := uuid.Parse(c.Param("id"))
-	if err != nil {
-		c.JSON(http.StatusBadRequest, dto.ErrorResponse{Error: "Invalid task ID"})
-		return
-	}
-
-	task, err := h.scheduler.FindTaskByID(id)
-	if err != nil {
-		if err == gorm.ErrRecordNotFound {
-			c.JSON(http.StatusNotFound, dto.ErrorResponse{Error: "Task not found"})
-			return
-		}
-		c.JSON(http.StatusInternalServerError, dto.ErrorResponse{Error: "Failed to retrieve task: " + err.Error()})
-		return
-	}
-	c.JSON(http.StatusOK, task)
-}
-
-// PauseTask pauses a scheduled task.
-// @Summary      Pause a task
-// @Description  Pauses a 'pending' task, preventing it from being executed.
-// @Tags         Scheduler
-// @Produce      json
-// @Param        id   path      string  true  "Task ID (UUID)"
-// @Success      200  {object}  dto.TaskResponse
-// @Failure      400  {object}  dto.ErrorResponse
-// @Failure      404  {object}  dto.ErrorResponse "Task not found or not in 'pending' state"
-// @Failure      500  {object}  dto.ErrorResponse
-// @Router       /scheduler/tasks/{id}/pause [post]
-func (h *TaskHandler) PauseTask(c *gin.Context) {
-	id, err := uuid.Parse(c.Param("id"))
-	if err != nil {
-		c.JSON(http.StatusBadRequest, dto.ErrorResponse{Error: "Invalid task ID"})
-		return
-	}
-
-	task, err := h.scheduler.PauseTask(id)
-	if err != nil {
-		if err == gorm.ErrRecordNotFound {
-			c.JSON(http.StatusNotFound, dto.ErrorResponse{Error: "Task not found or not in 'pending' state"})
-			return
-		}
-		c.JSON(http.StatusInternalServerError, dto.ErrorResponse{Error: "Failed to pause task: " + err.Error()})
-		return
-	}
-
-	c.JSON(http.StatusOK, task)
-}
-
-// RunTaskNow manually triggers a task to run as soon as possible.
-// @Summary      Run a task now
-// @Description  Manually triggers a 'pending' or 'paused' task to be executed immediately by the next available worker.
-// @Tags         Scheduler
-// @Produce      json
-// @Param        id   path      string  true  "Task ID (UUID)"
-// @Success      200  {object}  dto.TaskResponse
-// @Failure      400  {object}  dto.ErrorResponse
-// @Failure      404  {object}  dto.ErrorResponse "Task not found or not in a runnable state ('pending' or 'paused')"
-// @Failure      500  {object}  dto.ErrorResponse
-// @Router       /scheduler/tasks/{id}/run [post]
-func (h *TaskHandler) RunTaskNow(c *gin.Context) {
-	id, err := uuid.Parse(c.Param("id"))
-	if err != nil {
-		c.JSON(http.StatusBadRequest, dto.ErrorResponse{Error: "Invalid task ID"})
-		return
-	}
-
-	task, err := h.scheduler.RunTaskNow(id)
-	if err != nil {
-		if err == gorm.ErrRecordNotFound {
-			c.JSON(http.StatusNotFound, dto.ErrorResponse{Error: "Task not found or not in a runnable state ('pending' or 'paused')"})
-			return
-		}
-		c.JSON(http.StatusInternalServerError, dto.ErrorResponse{Error: "Failed to run task: " + err.Error()})
-		return
-	}
-
-	c.JSON(http.StatusOK, task)
-}
-
-// ResumeTask resumes a paused task.
-// @Summary      Resume a task
-// @Description  Resumes a 'paused' task, making it eligible for execution again.
-// @Tags         Scheduler
-// @Produce      json
-// @Param        id   path      string  true  "Task ID (UUID)"
-// @Success      200  {object}  dto.TaskResponse
-// @Failure      400  {object}  dto.ErrorResponse
-// @Failure      404  {object}  dto.ErrorResponse "Task not found or not in 'paused' state"
-// @Failure      500  {object}  dto.ErrorResponse
-// @Router       /scheduler/tasks/{id}/resume [post]
-func (h *TaskHandler) ResumeTask(c *gin.Context) {
-	id, err := uuid.Parse(c.Param("id"))
-	if err != nil {
-		c.JSON(http.StatusBadRequest, dto.ErrorResponse{Error: "Invalid task ID"})
-		return
-	}
-
-	task, err := h.scheduler.ResumeTask(id)
-	if err != nil {
-		if err == gorm.ErrRecordNotFound {
-			c.JSON(http.StatusNotFound, dto.ErrorResponse{Error: "Task not found or not in 'paused' state"})
-			return
-		}
-		c.JSON(http.StatusInternalServerError, dto.ErrorResponse{Error: "Failed to resume task: " + err.Error()})
-		return
-	}
-
-	c.JSON(http.StatusOK, task)
-}
-
-// CancelTask cancels a scheduled task.
-// @Summary      Cancel a task
-// @Description  Cancels a 'pending' or 'paused' task, preventing it from being executed.
-// @Tags         Scheduler
-// @Produce      json
-// @Param        id   path      string  true  "Task ID (UUID)"
-// @Success      200  {object}  dto.TaskResponse
-// @Failure      400  {object}  dto.ErrorResponse
-// @Failure      404  {object}  dto.ErrorResponse "Task not found or not in a cancelable state ('pending' or 'paused')"
-// @Failure      500  {object}  dto.ErrorResponse
-// @Router       /scheduler/tasks/{id}/cancel [post]
+// CancelTask cancels a pending or scheduled task
+// @Summary Cancel a task
+// @Description Cancel a pending or scheduled task
+// @Tags tasks
+// @Param id path string true "Task ID"
+// @Success 200 {object} dto.MessageResponse
+// @Failure 404 {object} dto.ErrorResponse
+// @Failure 500 {object} dto.ErrorResponse
+// @Router /scheduler/tasks/{id}/cancel [post]
 func (h *TaskHandler) CancelTask(c *gin.Context) {
-	id, err := uuid.Parse(c.Param("id"))
-	if err != nil {
-		c.JSON(http.StatusBadRequest, dto.ErrorResponse{Error: "Invalid task ID"})
-		return
-	}
+	taskID := c.Param("id")
 
-	task, err := h.scheduler.CancelTask(id)
+	// 1. Find the task in the database to get its queue.
+	dbTask, err := h.taskRepo.FindTaskByTaskID(c.Request.Context(), taskID)
 	if err != nil {
-		if err == gorm.ErrRecordNotFound {
-			c.JSON(http.StatusNotFound, dto.ErrorResponse{Error: "Task not found or not in a cancelable state ('pending' or 'paused')"})
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "task not found in database"})
 			return
 		}
-		c.JSON(http.StatusInternalServerError, dto.ErrorResponse{Error: "Failed to cancel task: " + err.Error()})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to find task in database", "details": err.Error()})
+		return
+	}
+	queue := h.getQueueNameFromPriority(dbTask.Priority)
+
+	// 2. Update status in the database to 'canceled'.
+	// This makes our DB the source of truth.
+	if err := h.taskRepo.UpdateTaskStatus(c.Request.Context(), taskID, dto.StatusCanceled); err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "task not found in database"})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update task status in database", "details": err.Error()})
 		return
 	}
 
-	c.JSON(http.StatusOK, task)
+	// 3. Attempt to delete the task from Redis.
+	if err := h.client.CancelTask(queue, taskID); err != nil {
+		// Log the error, but don't return a 500 error to the client
+		// because the primary operation (updating the DB) was successful.
+		// The reconciliation job can handle any inconsistencies later.
+		log.Printf("[WARN] Task %s was marked as 'canceled' in DB, but failed to be deleted from Redis queue '%s': %v", taskID, queue, err)
+	}
+
+	c.JSON(http.StatusOK, dto.MessageResponse{Message: "task cancelled successfully"})
 }
 
-// RetryFailedTask manually re-queues a failed task for execution.
-// @Summary      Retry a failed task
-// @Description  Resets a 'failed' task to 'pending' and queues it for immediate execution.
-// @Tags         Scheduler
-// @Produce      json
-// @Param        id   path      string  true  "Task ID (UUID)"
-// @Success      200  {object}  dto.TaskResponse
-// @Failure      400  {object}  dto.ErrorResponse
-// @Failure      404  {object}  dto.ErrorResponse "Task not found or not in 'failed' state"
-// @Failure      500  {object}  dto.ErrorResponse
-// @Router       /scheduler/tasks/{id}/retry [post]
-func (h *TaskHandler) RetryFailedTask(c *gin.Context) {
-	id, err := uuid.Parse(c.Param("id"))
-	if err != nil {
-		c.JSON(http.StatusBadRequest, dto.ErrorResponse{Error: "Invalid task ID"})
-		return
-	}
+// PauseTask pauses an individual task
+// @Summary Pause an individual task
+// @Description Removes a task from the queue and marks it as 'paused' in the database.
+// @Tags tasks
+// @Param id path string true "Task ID"
+// @Success 200 {object} dto.MessageResponse
+// @Failure 404 {object} dto.ErrorResponse
+// @Failure 500 {object} dto.ErrorResponse
+// @Router /scheduler/tasks/{id}/pause [post]
+func (h *TaskHandler) PauseTask(c *gin.Context) {
+	taskID := c.Param("id")
 
-	task, err := h.scheduler.RetryFailedTask(id)
+	// 1. Find the task in the database to get its queue.
+	dbTask, err := h.taskRepo.FindTaskByTaskID(c.Request.Context(), taskID)
 	if err != nil {
-		if err == gorm.ErrRecordNotFound {
-			c.JSON(http.StatusNotFound, dto.ErrorResponse{Error: "Task not found or not in 'failed' state"})
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "task not found in database"})
 			return
 		}
-		c.JSON(http.StatusInternalServerError, dto.ErrorResponse{Error: "Failed to retry task: " + err.Error()})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to find task in database", "details": err.Error()})
+		return
+	}
+	queue := h.getQueueNameFromPriority(dbTask.Priority)
+
+	// 2. Update status in the database to 'paused'.
+	if err := h.taskRepo.UpdateTaskStatus(c.Request.Context(), taskID, dto.StatusPaused); err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "task not found in database"})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update task status to paused", "details": err.Error()})
 		return
 	}
 
-	c.JSON(http.StatusOK, task)
+	// 3. Attempt to delete the task from Redis. This is the "pause" action.
+	if err := h.client.CancelTask(queue, taskID); err != nil {
+		// Log the error, but the main operation (DB update) was successful.
+		// The task is effectively paused from our system's perspective.
+		log.Printf("[WARN] Task %s was marked as 'paused' in DB, but failed to be deleted from Redis queue '%s': %v", taskID, queue, err)
+	}
+
+	c.JSON(http.StatusOK, dto.MessageResponse{Message: "task paused successfully"})
+}
+
+// ResumeTask resumes a paused task
+// @Summary Resume a paused task
+// @Description Re-enqueues a task that was previously marked as 'paused'.
+// @Tags tasks
+// @Param id path string true "Task ID"
+// @Success 200 {object} dto.CreateTaskResponse
+// @Failure 400 {object} dto.ErrorResponse
+// @Failure 404 {object} dto.ErrorResponse
+// @Failure 500 {object} dto.ErrorResponse
+// @Router /scheduler/tasks/{id}/resume [post]
+func (h *TaskHandler) ResumeTask(c *gin.Context) {
+	taskID := c.Param("id")
+
+	// 1. Find the task in the database and get its full details.
+	dbTask, err := h.taskRepo.FindTaskWithDetails(c.Request.Context(), taskID)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "task not found in database"})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to find task in database", "details": err.Error()})
+		return
+	}
+
+	// 2. Check if the task is actually paused.
+	if dbTask.Status != dto.StatusPaused {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "task is not in 'paused' state", "current_status": dbTask.Status})
+		return
+	}
+
+	// 3. Re-enqueue the task.
+	taskType := dbTask.EntityName + ":" + dbTask.ActionName
+	queueName := h.getQueueNameFromPriority(dbTask.Priority)
+
+	opts := []asynq.Option{
+		asynq.MaxRetry(dbTask.MaxRetries),
+		asynq.Queue(queueName),
+		asynq.TaskID(dbTask.ID.String()),
+	}
+
+	var info *asynq.TaskInfo
+	newStatus := dto.StatusPending
+
+	// Decide whether to schedule it or enqueue it immediately.
+	if dbTask.ScheduledAt.After(time.Now()) {
+		info, err = h.client.ScheduleTask(taskType, dbTask.Payload, dbTask.ScheduledAt, opts...)
+		newStatus = dto.StatusScheduled
+	} else {
+		info, err = h.client.EnqueueTask(taskType, dbTask.Payload, opts...)
+	}
+
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to re-enqueue task", "details": err.Error()})
+		return
+	}
+
+	// 4. Update the task status back in the database.
+	if err := h.taskRepo.UpdateTaskStatus(c.Request.Context(), taskID, newStatus); err != nil {
+		log.Printf("[ERROR] Failed to update status for resumed task %s: %v", taskID, err)
+		// Don't fail the request, but log this critical inconsistency.
+	}
+
+	c.JSON(http.StatusOK, dto.CreateTaskResponse{
+		ID:          info.ID,
+		DatabaseID:  dbTask.ID,
+		Type:        info.Type,
+		Queue:       info.Queue,
+		Status:      info.State.String(),
+		StatusInDB:  string(newStatus),
+		MaxRetries:  info.MaxRetry,
+		ScheduledAt: info.NextProcessAt,
+	})
+}
+
+// PauseQueue pauses an entire queue
+// @Summary Pause an entire queue
+// @Description Stops workers from processing new tasks from the specified queue.
+// @Tags queues
+// @Param name path string true "Queue name"
+// @Success 200 {object} dto.MessageResponse
+// @Failure 500 {object} dto.ErrorResponse
+// @Router /scheduler/queues/{name}/pause [post]
+func (h *TaskHandler) PauseQueue(c *gin.Context) {
+	queueName := c.Param("name")
+	if err := h.client.PauseQueue(queueName); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to pause queue", "details": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, dto.MessageResponse{Message: "queue '" + queueName + "' paused successfully"})
+}
+
+// ResumeQueue resumes a paused queue
+// @Summary Resume a paused queue
+// @Description Allows workers to start processing tasks from the specified queue again.
+// @Tags queues
+// @Param name path string true "Queue name"
+// @Success 200 {object} dto.MessageResponse
+// @Failure 500 {object} dto.ErrorResponse
+// @Router /scheduler/queues/{name}/resume [post]
+func (h *TaskHandler) ResumeQueue(c *gin.Context) {
+	queueName := c.Param("name")
+	if err := h.client.ResumeQueue(queueName); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to resume queue", "details": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, dto.MessageResponse{Message: "queue '" + queueName + "' resumed successfully"})
+}
+
+// GetQueueStats retrieves statistics for all queues
+// @Summary Get queue statistics
+// @Description Get statistics for all queues
+// @Tags stats
+// @Produce json
+// @Success 200 {object} map[string]dto.QueueStats
+// @Failure 500 {object} dto.ErrorResponse
+// @Router /scheduler/stats/queues [get]
+func (h *TaskHandler) GetQueueStats(c *gin.Context) {
+	stats, err := h.client.GetQueueStats()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	result := make(map[string]dto.QueueStats)
+	for queue, info := range stats {
+		result[queue] = dto.QueueStats{
+			Size:      info.Size,
+			Pending:   info.Pending,
+			Active:    info.Active,
+			Scheduled: info.Scheduled,
+			Retry:     info.Retry,
+			Archived:  info.Archived,
+			Processed: info.Processed,
+			Failed:    info.Failed,
+			Paused:    info.Paused,
+		}
+	}
+
+	c.JSON(http.StatusOK, result)
+}
+
+// HealthCheck returns server health status
+// @Summary Health check
+// @Description Check if the service is healthy
+// @Tags health
+// @Produce json
+// @Success 200 {object} gin.H
+// @Router /health [get]
+func (h *TaskHandler) HealthCheck(c *gin.Context) {
+	c.JSON(http.StatusOK, gin.H{
+		"status": "healthy",
+		"time":   time.Now(),
+	})
+}
+
+// getQueueNameFromPriority is a helper to find the queue name string from its integer value.
+func (h *TaskHandler) getQueueNameFromPriority(priorityLevel int) string {
+	for name, level := range h.cfg.Queues {
+		if level == priorityLevel {
+			return name
+		}
+	}
+	return "default" // Fallback to default
 }

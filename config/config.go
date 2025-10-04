@@ -1,89 +1,115 @@
 package config
 
 import (
-	"fmt"
+	"log"
 	"os"
 	"strconv"
-	"time"
 
 	"github.com/joho/godotenv"
 )
 
-// Config holds all configuration for the application
 type Config struct {
-	DBSource              string
-	RedisURL              string
-	WorkerConcurrency     int
-	WorkerPollInterval    time.Duration
-	LockTTL               time.Duration
-	PeriodicReconInterval time.Duration
-	MaxFailRefresh        int
-	BackoffBaseDelay      time.Duration
-	BackoffMaxDelay       time.Duration
+	// Database
+	PostgresUser     string
+	PostgresPassword string
+	PostgresDB       string
+	PostgresHost     string
+	PostgresPort     string
+
+	// Redis
+	RedisAddr     string
+	RedisPassword string
+	RedisDB       int
+
+	// Server
+	Port string
+	TZ   string
+
+	// Asynq Worker Configuration
+	WorkerConcurrency int
+
+	// Queue Priorities (high to low)
+	Queues map[string]int
+
+	// Retry Configuration
+	MaxRetry       int
+	RetryDelayFunc string // "exponential" or "constant"
+
+	// Task Timeout
+	TaskTimeout int // seconds
+
+	// Task Retention
+	TaskRetention int // hours, how long to keep completed tasks
 }
 
-// LoadConfig loads configuration from .env file
-func LoadConfig() (*Config, error) {
+func LoadConfig() *Config {
+	// Load .env file if exists
 	if err := godotenv.Load(); err != nil {
-		// Don't fail if .env is not present, it might be set in the environment
-	}
-
-	// --- Database & Redis Configuration ---
-	dsn := fmt.Sprintf("host=%s user=%s password=%s dbname=%s port=%s sslmode=disable TimeZone=%s",
-		os.Getenv("POSTGRES_HOST"),
-		os.Getenv("POSTGRES_USER"),
-		os.Getenv("POSTGRES_PASSWORD"),
-		os.Getenv("POSTGRES_DB"),
-		os.Getenv("POSTGRES_PORT"),
-		os.Getenv("TZ"),
-	)
-
-	// --- Worker Configuration ---
-	workerConcurrency, err := strconv.Atoi(os.Getenv("WORKER_CONCURRENCY"))
-	if err != nil || workerConcurrency <= 0 {
-		workerConcurrency = 10 // Default value
-	}
-
-	pollIntervalSeconds, err := strconv.Atoi(os.Getenv("WORKER_POLL_INTERVAL_SECONDS"))
-	if err != nil || pollIntervalSeconds <= 0 {
-		pollIntervalSeconds = 10 // Default value
-	}
-
-	// --- Task Lock & Resilience Configuration ---
-	lockTTLSeconds, err := strconv.Atoi(os.Getenv("LOCK_TTL_SECONDS"))
-	if err != nil || lockTTLSeconds <= 0 {
-		lockTTLSeconds = 300 // Default: 5 minutes
-	}
-
-	reconIntervalSeconds, err := strconv.Atoi(os.Getenv("PERIODIC_RECON_INTERVAL_SECONDS"))
-	if err != nil || reconIntervalSeconds <= 0 {
-		reconIntervalSeconds = 300 // Default: 5 minutes
-	}
-
-	maxFailRefresh, err := strconv.Atoi(os.Getenv("MAX_FAIL_REFRESH"))
-	if err != nil || maxFailRefresh <= 0 {
-		maxFailRefresh = 3 // Default value
-	}
-
-	backoffBaseSeconds, err := strconv.Atoi(os.Getenv("BACKOFF_BASE_DELAY_SECONDS"))
-	if err != nil || backoffBaseSeconds <= 0 {
-		backoffBaseSeconds = 5 // Default value
-	}
-
-	backoffMaxSeconds, err := strconv.Atoi(os.Getenv("BACKOFF_MAX_DELAY_SECONDS"))
-	if err != nil || backoffMaxSeconds <= 0 {
-		backoffMaxSeconds = 300 // Default: 5 minutes
+		log.Println("No .env file found, using environment variables")
 	}
 
 	return &Config{
-		DBSource:              dsn,
-		RedisURL:              os.Getenv("REDIS_ADDR"),
-		WorkerConcurrency:     workerConcurrency,
-		WorkerPollInterval:    time.Duration(pollIntervalSeconds) * time.Second,
-		LockTTL:               time.Duration(lockTTLSeconds) * time.Second,
-		PeriodicReconInterval: time.Duration(reconIntervalSeconds) * time.Second,
-		MaxFailRefresh:        maxFailRefresh,
-		BackoffBaseDelay:      time.Duration(backoffBaseSeconds) * time.Second,
-		BackoffMaxDelay:       time.Duration(backoffMaxSeconds) * time.Second,
-	}, nil
+		// Database
+		PostgresUser:     getEnv("POSTGRES_USER", "user"),
+		PostgresPassword: getEnv("POSTGRES_PASSWORD", "password"),
+		PostgresDB:       getEnv("POSTGRES_DB", "scheduler_db"),
+		PostgresHost:     getEnv("POSTGRES_HOST", "localhost"),
+		PostgresPort:     getEnv("POSTGRES_PORT", "5432"),
+
+		// Redis
+		RedisAddr:     getEnv("REDIS_ADDR", "localhost:6379"),
+		RedisPassword: getEnv("REDIS_PASSWORD", ""),
+		RedisDB:       getEnvAsInt("REDIS_DB", 0),
+
+		// Server
+		Port: getEnv("PORT", "8080"),
+		TZ:   getEnv("TZ", "Asia/Jakarta"),
+
+		// Asynq Worker
+		WorkerConcurrency: getEnvAsInt("WORKER_CONCURRENCY", 10),
+
+		// Queue Priorities (priority level as value)
+		Queues: map[string]int{
+			"critical": 6, // Highest priority
+			"high":     5,
+			"default":  4,
+			"medium":   3,
+			"low":      2,
+			"batch":    1, // Lowest priority
+		},
+
+		// Retry
+		MaxRetry:       getEnvAsInt("MAX_RETRY", 5),
+		RetryDelayFunc: getEnv("RETRY_DELAY_FUNC", "exponential"),
+
+		// Timeout
+		TaskTimeout: getEnvAsInt("TASK_TIMEOUT_SECONDS", 300),
+
+		// Retention
+		TaskRetention: getEnvAsInt("TASK_RETENTION_HOURS", 24),
+	}
+}
+
+func getEnv(key, defaultValue string) string {
+	if value := os.Getenv(key); value != "" {
+		return value
+	}
+	return defaultValue
+}
+
+func getEnvAsInt(key string, defaultValue int) int {
+	valueStr := getEnv(key, "")
+	if value, err := strconv.Atoi(valueStr); err == nil {
+		return value
+	}
+	return defaultValue
+}
+
+func (c *Config) GetDSN() string {
+	return "host=" + c.PostgresHost +
+		" user=" + c.PostgresUser +
+		" password=" + c.PostgresPassword +
+		" dbname=" + c.PostgresDB +
+		" port=" + c.PostgresPort +
+		" sslmode=disable TimeZone=" + c.TZ
 }
