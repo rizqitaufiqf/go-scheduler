@@ -1,18 +1,18 @@
-# Go Scheduler dengan Arsitektur Hibrida (PostgreSQL + Asynq)
+# Go Scheduler with a Hybrid Architecture (PostgreSQL + Asynq)
 
-## Ringkasan Arsitektur
+## Architectural Overview
 
-Proyek ini mengimplementasikan sistem penjadwalan tugas (*task scheduler*) yang andal di Go dengan menggunakan **arsitektur hibrida**. Arsitektur ini menggabungkan keunggulan dari dua dunia:
+This project implements a reliable task scheduler in Go using a **hybrid architecture**. This architecture combines the best of two worlds:
 
-1.  **PostgreSQL sebagai *Single Source of Truth***: Semua metadata dan status tugas (seperti `scheduled`, `processing`, `completed`, `paused`) disimpan secara persisten di database. Ini memungkinkan audit trail yang lengkap, kemampuan query yang kompleks, dan jaminan integritas data.
-2.  **Asynq sebagai *Robust Task Processor***: Asynq digunakan untuk menangani eksekusi tugas, termasuk antrian prioritas, mekanisme *retry* otomatis, *concurrency control*, dan pemantauan melalui UI web (Asynqmon).
+1.  **PostgreSQL as a *Single Source of Truth***: All task metadata and statuses (such as `scheduled`, `processing`, `completed`, `paused`) are stored persistently in the database. This allows for a complete audit trail, complex query capabilities, and data integrity guarantees.
+2.  **Asynq as a *Robust Task Processor***: Asynq is used to handle task execution, including priority queues, automatic retry mechanisms, concurrency control, and monitoring via a web UI (Asynqmon).
 
-### Alur Kerja
+### Workflow
 
 ```
 ┌─────────────┐   1. Create Task   ┌───────────────┐   2. Enqueue Task   ┌─────────────┐
 │   Client    │───────────────────▶│  PostgreSQL   │────────────────────▶│    Redis    │
-│ (API Call)  │                    │ (Source of Truth) │                     │   (Broker)  │
+│ (API Call)  │                    │(Source of Truth)│                   │   (Broker)  │
 └─────────────┘                    └───────┬───────┘                     └──────┬──────┘
                                            │ 5. Update Status                  │ 3. Process Task
                                            │                                   │
@@ -23,13 +23,13 @@ Proyek ini mengimplementasikan sistem penjadwalan tugas (*task scheduler*) yang 
                                                                         └─────────────┘
 ```
 
-### Mekanisme Rekonsiliasi
+### Reconciliation Mechanism
 
-Untuk mengatasi potensi inkonsistensi antara database dan Redis (misalnya, jika server mati setelah menyimpan ke DB tetapi sebelum *enqueue* ke Redis), sistem ini dilengkapi dengan **proses rekonsiliasi**:
--   **Saat Startup**: Worker akan memindai tugas yang "seharusnya aktif" di DB (`pending`, `retrying`, `processing` yang macet) dan menjadwalkannya kembali ke Asynq jika tidak ditemukan di Redis.
--   **Secara Periodik**: Tugas rekonsiliasi berjalan secara berkala untuk memastikan konsistensi jangka panjang.
+To address potential inconsistencies between the database and Redis (e.g., if the server crashes after saving to the DB but before enqueuing to Redis), this system includes a **reconciliation process**:
+-   **On Startup**: The worker scans for tasks that "should be active" in the DB (`pending`, `retrying`, stale `processing` tasks) and re-enqueues them to Asynq if they are not found in Redis.
+-   **Periodically**: A reconciliation task runs at regular intervals to ensure long-term consistency.
 
-## Struktur Direktori
+## Directory Structure
 
 ```plaintext
 go-scheduler/
@@ -47,13 +47,13 @@ go-scheduler/
 ├── docker-compose.yml      # Docker services definition
 ├── Dockerfile              # Docker build instructions for the Go app
 ├── go.mod                  # Go module dependencies
-└── main.go                 # Application entrypoint
-├── USAGE_EXAMPLE.md        # Contoh penggunaan API dengan cURL
+├── main.go                 # Application entrypoint
+└── USAGE_EXAMPLE.md        # API usage examples with cURL
 ```
 
-## Fitur Utama Asynq
+## Key Asynq Features Used
 
-### 1. **Automatic Retry dengan Berbagai Strategi**
+### 1. **Automatic Retry with Various Strategies**
 ```go
 // Exponential backoff
 asynq.MaxRetry(10)
@@ -122,31 +122,31 @@ client.Enqueue(task,
 
 **Scheduler Custom:**
 ```
-- tasks:pending (sorted set dengan score = scheduled_at)
-- task:locks:{id} (string dengan TTL)
+- tasks:pending (sorted set with score = scheduled_at)
+- task:locks:{id} (string with TTL)
 - Manual ZADD, ZRANGEBYSCORE, SETNX
 ```
 
 **Asynq:**
 ```
-- asynq:queues:{queue} (list untuk ready tasks)
-- asynq:scheduled (sorted set dengan score = process_at)
-- asynq:retry (sorted set untuk retry)
+- asynq:queues:{queue} (list for ready tasks)
+- asynq:scheduled (sorted set with score = process_at)
+- asynq:retry (sorted set for retries)
 - asynq:archived (completed/failed tasks)
-- asynq:lease (atomic lease dengan Lua scripts)
+- asynq:lease (atomic leasing with Lua scripts)
 ```
 
 ### Database Usage
 
 **Scheduler Custom:**
-- Database sebagai single source of truth
-- Redis untuk queueing
-- Perlu reconciliation logic
+- Database as the single source of truth
+- Redis used for queueing
+- Reconciliation logic required
 
 **Asynq:**
-- Redis sebagai source of truth
-- Database opsional (untuk audit/reporting)
-- Tidak perlu reconciliation
+- Redis as the source of truth
+- Database optional (for auditing/reporting)
+- No reconciliation required
 
 ### Failure Handling
 
@@ -172,98 +172,114 @@ func ProcessTask(ctx context.Context, t *asynq.Task) error {
 }
 ```
 
-## Kelebihan Asynq
+# Advantages of Asynq vs Custom Scheduler
+
+## Advantages of Asynq
 
 ### ✅ Pros
-1. **Production-ready**: Battle-tested, digunakan banyak perusahaan
-2. **Less code**: Tidak perlu implement worker pool, locking, retry logic
-3. **Better tooling**: Web UI, CLI, metrics out of the box
-4. **Advanced features**: Aggregation, rate limiting, unique tasks
-5. **Active development**: Regular updates & bug fixes
-6. **Good documentation**: Comprehensive docs & examples
-7. **Atomic operations**: Lua scripts untuk consistency
-8. **Graceful shutdown**: Handle signals properly
+1. **Production-ready**: Battle-tested and used by many companies  
+2. **Less code**: No need to implement worker pools, locking, or retry logic  
+3. **Better tooling**: Web UI, CLI, and metrics out of the box  
+4. **Advanced features**: Aggregation, rate limiting, unique tasks  
+5. **Active development**: Regular updates and bug fixes  
+6. **Good documentation**: Comprehensive docs and examples  
+7. **Atomic operations**: Lua scripts ensure consistency  
+8. **Graceful shutdown**: Properly handles signals  
 
 ### ⚠️ Cons
-1. **Redis-centric**: Redis adalah single source of truth
-2. **Less flexibility**: Terikat dengan Asynq patterns
-3. **Learning curve**: Perlu pelajari Asynq conventions
-4. **Opinionated**: Struktur data & flow sudah defined
+1. **Redis-centric**: Redis is the single source of truth  
+2. **Less flexibility**: Tied to Asynq’s patterns  
+3. **Learning curve**: Requires learning Asynq conventions  
+4. **Opinionated**: Data structures and flow are predefined  
 
-## Kelebihan Scheduler Custom Anda
+---
+
+## Advantages of Your Custom Scheduler
 
 ### ✅ Pros
-1. **Database-centric**: PostgreSQL sebagai source of truth
-2. **Full control**: Bisa customize setiap aspek
-3. **Flexible schema**: Bisa tambah field custom
-4. **Query capability**: Bisa query tasks kompleks di DB
-5. **Audit trail**: History lengkap di database
-6. **Custom logic**: Bisa implement business rules spesifik
+1. **Database-centric**: PostgreSQL as the source of truth  
+2. **Full control**: You can customize every aspect  
+3. **Flexible schema**: Easily add custom fields  
+4. **Query capability**: Perform complex task queries directly in the database  
+5. **Audit trail**: Complete history stored in the database  
+6. **Custom logic**: Implement specific business rules  
 
 ### ⚠️ Cons
-1. **More maintenance**: Perlu maintain worker logic sendiri
-2. **More code**: Lebih banyak boilerplate
-3. **Testing complexity**: Perlu test edge cases sendiri
-4. **No built-in monitoring**: Perlu build sendiri
-5. **Reconciliation needed**: Perlu handle crash recovery
+1. **More maintenance**: You need to maintain the worker logic yourself  
+2. **More code**: Involves more boilerplate  
+3. **Testing complexity**: You need to test edge cases manually  
+4. **No built-in monitoring**: You must build monitoring tools yourself  
+5. **Reconciliation needed**: You must handle crash recovery  
 
-## Rekomendasi
+---
 
-### Gunakan **Scheduler Custom** jika:
-- Perlu database sebagai source of truth
-- Butuh query capability kompleks
-- Butuh audit trail lengkap di database
-- Perlu custom business logic yang kompleks
-- Team sudah familiar dengan codebase
+## Recommendation
 
-### Gunakan **Asynq** jika:
-- Ingin solution yang battle-tested
-- Perlu monitoring & observability out of the box
-- Ingin less maintenance overhead
-- Butuh advanced features (aggregation, rate limiting)
-- Starting new project
-- Team kecil dengan limited resources
+### Use **Custom Scheduler** if:
+- You need the database to be the source of truth  
+- You require complex querying capabilities  
+- You need a complete audit trail in the database  
+- You have complex custom business logic  
+- Your team is already familiar with the existing codebase  
+
+### Use **Asynq** if:
+- You want a battle-tested solution  
+- You need monitoring and observability out of the box  
+- You prefer less maintenance overhead  
+- You need advanced features (aggregation, rate limiting)  
+- You’re starting a new project  
+- You have a small team with limited resources  
+
+---
 
 ## Migration Path
 
-Jika ingin migrate dari custom ke Asynq:
+If you want to migrate from a custom scheduler to Asynq:
 
-1. **Hybrid Approach**: 
-   - Keep database untuk audit
-   - Use Asynq untuk processing
-   - Sync status dari Asynq ke database
+### 1. Hybrid Approach
+- Keep the database for auditing  
+- Use Asynq for processing  
+- Sync task status from Asynq to the database  
 
-2. **Gradual Migration**:
-   - Start dengan task types baru di Asynq
-   - Legacy tasks tetap di custom scheduler
-   - Migrate gradually
+### 2. Gradual Migration
+- Start using Asynq for new task types  
+- Keep legacy tasks in the custom scheduler  
+- Migrate gradually over time  
 
-3. **Full Migration**:
-   - Move semua task processing ke Asynq
-   - Use database hanya untuk reporting
-   - Implement event sourcing jika perlu audit
+### 3. Full Migration
+- Move all task processing to Asynq  
+- Use the database only for reporting  
+- Implement event sourcing if auditing is required  
+
+---
 
 ## Setup Instructions
 
-Lihat file-file implementasi berikut:
-- `main.go` - Entry point
-- `tasks/client.go` - Asynq client setup
-- `worker/server.go` - Asynq server setup
-- `tasks/processor.go` - Task processors
-- `handler/task_handler.go` - API handlers
+Check the following implementation files:
+
+- `main.go` – Entry point  
+- `tasks/client.go` – Asynq client setup  
+- `worker/server.go` – Asynq server setup  
+- `tasks/processor.go` – Task processors  
+- `handler/task_handler.go` – API handlers  
+
+---
 
 ## Resources
 
-- Asynq Documentation: https://github.com/hibiken/asynq
-- Asynqmon (Web UI): https://github.com/hibiken/asynqmon
-- Examples: https://github.com/hibiken/asynq/tree/master/examples
+- [Asynq Documentation](https://github.com/hibiken/asynq)  
+- [Asynqmon (Web UI)](https://github.com/hibiken/asynqmon)  
+- [Examples](https://github.com/hibiken/asynq/tree/master/examples)  
 
-## Kesimpulan
+---
 
-Kedua approach punya kelebihan masing-masing. Custom scheduler memberikan flexibility & control penuh, sementara Asynq memberikan production-ready solution dengan less code & better tooling.
+## Conclusion
 
-Pilihan tergantung pada:
-- Requirements spesifik project
-- Team size & expertise
-- Maintenance capacity
-- Timeline & budget
+Both approaches have their own advantages.  
+A **custom scheduler** offers full flexibility and control, while **Asynq** provides a **production-ready solution** with less code and better tooling.
+
+The choice depends on:
+- Specific project requirements  
+- Team size and expertise  
+- Maintenance capacity  
+- Timeline and budget

@@ -1,25 +1,25 @@
--- Rollback: kembalikan daftar status ke semula (tanpa 'canceled').
+-- Rollback: revert the list of statuses to the original (without 'canceled').
 
 BEGIN;
 
--- Pastikan tidak ada baris yang masih berstatus 'canceled' sebelum rollback.
--- Jika ada, ubah dulu. Contoh:
+-- Ensure no rows still have the 'canceled' status before rolling back.
+-- If they exist, change them first. Example:
 -- UPDATE scheduled_tasks SET status = 'failed' WHERE status = 'canceled';
 
--- 1) Tambahkan constraint lama (tanpa 'canceled') sebagai NOT VALID
+-- 1) Add the old constraint (without 'canceled') as NOT VALID.
 ALTER TABLE scheduled_tasks
   ADD CONSTRAINT chk_scheduled_tasks_status_old
   CHECK (status IN ('pending','processing','completed','failed')) NOT VALID;
 
--- 2) Validasi constraint lama
+-- 2) Validate the old constraint.
 ALTER TABLE scheduled_tasks
   VALIDATE CONSTRAINT chk_scheduled_tasks_status_old;
 
--- 3) Hapus constraint aktif
+-- 3) Drop the currently active constraint.
 ALTER TABLE scheduled_tasks
   DROP CONSTRAINT chk_scheduled_tasks_status;
 
--- 4) Rename kembali agar konsisten
+-- 4) Rename the old constraint back to be consistent.
 ALTER TABLE scheduled_tasks
   RENAME CONSTRAINT chk_scheduled_tasks_status_old
   TO chk_scheduled_tasks_status;

@@ -1,4 +1,4 @@
-# Contoh Penggunaan API - Go Scheduler (Hybrid)
+# API Usage Examples - Go Scheduler (Hybrid)
 
 ## Setup
 
@@ -24,9 +24,9 @@ docker-compose logs -f app
 - **Asynqmon (Web UI)**: http://localhost:8081
 - **Health Check**: http://localhost:8080/health
 
-## 1. Schedule Task (untuk waktu tertentu)
+## 1. Schedule a Task (for a specific time)
 
-### Product Create Task
+### Example: Product Create Task
 ```bash
 curl -X POST http://localhost:8080/api/v1/scheduler/tasks -v \
   -H "Content-Type: application/json" \
@@ -240,20 +240,21 @@ curl -X POST http://localhost:8080/api/v1/scheduler/tasks/enqueue \
   }'
 ```
 
-## 9. Monitoring dengan Asynqmon
+## 9. Monitoring with Asynqmon
 
-Buka browser dan akses: http://localhost:8081
+Open your browser and go to: [http://localhost:8081](http://localhost:8081)
 
-Features di Asynqmon:
-- Real-time task monitoring
-- Task statistics per queue
-- Task details dan payload
-- Retry/archive/delete tasks
+Features in Asynqmon:
+- Real-time task monitoring  
+- Task statistics per queue  
+- Task details and payload inspection  
+- Retry, archive, or delete tasks
+
 
 ## 10. Advanced Features (via Asynq)
 
-### Unique Tasks (mencegah duplikasi)
-Untuk membuat unique task, gunakan code berikut di aplikasi:
+### Unique Tasks (Preventing Duplicates)
+To create a unique task, use the following code in your application:
 
 ```go
 client.EnqueueUniqueTask(
@@ -283,9 +284,9 @@ client.EnqueueTask(
 )
 ```
 
-## 10. Testing Mekanisme Retry
+## 11. Testing the Retry Mechanism
 
-Untuk test retry, buat task yang akan gagal:
+To test the retry mechanism, create a task that is designed to fail:
 
 ```bash
 # Misal processor diatur untuk fail 2x pertama
@@ -302,32 +303,31 @@ curl -X POST http://localhost:8080/api/v1/scheduler/tasks/enqueue \
   }'
 ```
 
-Monitor retry di:
-
 ## Troubleshooting
 
-### Task tidak diproses
-1. Cek worker running: `docker-compose logs app`
-2. Cek Redis connection
-3. Cek queue name match antara enqueue dan processor
+### Task Not Being Processed
+1. Check if the worker is running: `docker-compose logs app`  
+2. Check the Redis connection  
+3. Ensure the queue name matches between enqueue and processor
 
-### Task gagal terus
-1. Cek logs untuk error detail
-2. Cek max_retries sudah habis
-3. Monitor di Asynqmon
+### Task Keeps Failing
+1. Check the logs for detailed error messages  
+2. Verify if `max_retries` has been exhausted  
+3. Monitor retries in Asynqmon
 
-### Performance issues
-1. Increase WORKER_CONCURRENCY
-2. Add more worker instances
-3. Optimize processor logic
+### Performance Issues
+1. Increase `WORKER_CONCURRENCY`  
+2. Add more worker instances  
+3. Optimize the processor logic
 
-## Kesimpulan
+## Conclusion
 
-Arsitektur hibrida ini memberikan:
-✅ **Ketahanan Data**: State disimpan di PostgreSQL.
-✅ **Kemampuan Audit**: Riwayat lengkap task ada di database.
-✅ **Pemrosesan Andal**: Menggunakan fitur-fitur canggih dari Asynq (retry, priority, dll).
-✅ **Observability**: Pemantauan real-time via Asynqmon dan data historis via SQL.
-✅ **Self-Healing**: Mekanisme rekonsiliasi otomatis.
+This hybrid architecture provides:
 
-Pendekatan ini sangat cocok untuk aplikasi production-grade yang membutuhkan keandalan data tinggi dan pemrosesan tugas yang kompleks.
+✅ **Data Resilience**: Task states are stored in PostgreSQL.  
+✅ **Audit Capability**: Complete task history is kept in the database.  
+✅ **Reliable Processing**: Leverages Asynq’s advanced features (retry, priority, etc.).  
+✅ **Observability**: Real-time monitoring via Asynqmon and historical data via SQL.  
+✅ **Self-Healing**: Automatic reconciliation mechanisms ensure consistency.
+
+This approach is well-suited for production-grade applications that require high data reliability and complex task processing.

@@ -6,9 +6,9 @@ services:
     container_name: scheduler-app-prod
     ports:
       - "8080:8080"
-    # Menggunakan variabel lingkungan individual yang dibaca oleh config.go
+    # Use individual environment variables that are read by config.go
     environment:
-      - POSTGRES_HOST=postgresql # Gunakan nama service sebagai host
+      - POSTGRES_HOST=postgresql # Use the service name as the host
       - POSTGRES_PORT=${POSTGRES_PORT}
       - POSTGRES_USER=${POSTGRES_USER}
       - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
@@ -31,7 +31,7 @@ services:
       - TZ=${TZ:-UTC}
     volumes:
       - ./sql/init.sql:/docker-entrypoint-initdb.d/init.sql
-      - postgres-data:/var/lib/postgresql/data
+      - postgres-data-prod:/var/lib/postgresql/data
     # In a real production setup, you might not expose the DB port publicly
     # ports:
     #   - "5432:5432"
@@ -47,7 +47,7 @@ services:
   asynqmon:
     image: hibiken/asynqmon:latest
     container_name: scheduler-asynqmon-prod
-    # Port 8081 hanya untuk contoh. Di produksi, idealnya diakses melalui reverse proxy.
+    # Port 8081 is for example only. In production, it should ideally be accessed via a reverse proxy.
     ports:
       - "8081:8081"
     command: --redis-addr=redis:6379
@@ -55,4 +55,4 @@ services:
       - redis
 
 volumes:
-  postgres-data:
+  postgres-data-prod:

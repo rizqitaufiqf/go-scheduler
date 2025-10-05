@@ -12,19 +12,20 @@ import (
 
 type TaskStatus string
 
-// Defines the possible statuses for a task, aligned with Asynq's lifecycle.
+// Defines the possible statuses for a task, aligned with both Asynq's lifecycle and custom application states.
 const (
 	// Asynq-aligned statuses
-	StatusScheduled  TaskStatus = "scheduled"  // Task is scheduled for future execution.
-	StatusPending    TaskStatus = "pending"    // Task is in a queue, waiting to be processed.
-	StatusProcessing TaskStatus = "processing" // Task is being processed by a worker (maps to Asynq's 'active').
-	StatusRetrying   TaskStatus = "retrying"   // Task has failed and is waiting for a retry.
-	StatusArchived   TaskStatus = "archived"   // Task has failed all retries and is moved to the archive.
-	StatusCompleted  TaskStatus = "completed"  // Task has been processed successfully.
+	StatusScheduled  TaskStatus = "scheduled"  // The task is scheduled for future execution.
+	StatusPending    TaskStatus = "pending"    // The task is in a queue, waiting to be processed.
+	StatusProcessing TaskStatus = "processing" // The task is currently being processed by a worker.
+	StatusRetrying   TaskStatus = "retrying"   // The task has failed and is waiting for a retry.
+	StatusArchived   TaskStatus = "archived"   // The task has failed all retries and is moved to the archive.
+	StatusCompleted  TaskStatus = "completed"  // The task has been processed successfully.
 
 	// Custom application-specific statuses
-	StatusCanceled TaskStatus = "canceled" // Task was canceled by a user.
-	StatusPaused   TaskStatus = "paused"   // Task is intentionally paused and not in the queue.
+	StatusCanceled      TaskStatus = "canceled"       // The task was canceled by a user.
+	StatusPaused        TaskStatus = "paused"         // The task is intentionally paused and not in the queue.
+	StatusEnqueueFailed TaskStatus = "enqueue_failed" // The task was saved to the DB but failed to be enqueued to Redis.
 )
 
 const (
@@ -53,7 +54,7 @@ func (j *JSONB) Scan(value interface{}) error {
 	return json.Unmarshal(bytes, &j)
 }
 
-// TaskScheduler represents the `task_schedulers` table in the database.
+// TaskScheduler represents the `task_schedulers` table, acting as the source of truth for all tasks.
 type TaskScheduler struct {
 	ID           uuid.UUID      `gorm:"type:uuid;primary_key;" json:"id"`
 	TaskEntityID uuid.UUID      `gorm:"type:uuid;not null" json:"task_entity_id"`
@@ -77,7 +78,7 @@ func (TaskScheduler) TableName() string {
 	return "public.task_schedulers"
 }
 
-// TaskWithDetails is a helper struct to hold task data along with entity/action names.
+// TaskWithDetails is a DTO for holding task data along with joined entity/action names.
 type TaskWithDetails struct {
 	TaskScheduler
 	EntityName string `json:"entity_name"`
@@ -112,7 +113,7 @@ type CreateTaskResponse struct {
 	Status      string    `json:"status" example:"pending"`
 	StatusInDB  string    `json:"status_in_db" example:"pending"`
 	MaxRetries  int       `json:"max_retries" example:"5"`
-	Retried     int       `json:"retried" example:"0"`
+	Retried     int       `json:"retried,omitempty" example:"0"`
 	ScheduledAt time.Time `json:"scheduled_at" example:"2025-10-20T10:00:00Z"`
 }
 
@@ -124,8 +125,8 @@ type TaskResponse struct {
 	Status      string    `json:"status"`
 	MaxRetries  int       `json:"max_retries"`
 	Retried     int       `json:"retried"`
-	ScheduledAt time.Time `json:"scheduled_at"`
-	CreatedAt   time.Time `json:"created_at"`
+	ScheduledAt time.Time `json:"scheduled_at,omitempty"`
+	CreatedAt   time.Time `json:"created_at,omitempty"`
 }
 
 // TaskListResponse is the response for listing tasks

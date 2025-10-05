@@ -36,7 +36,7 @@ func NewTaskHandler(client *tasks.Client, db *gorm.DB, cfg *config.Config) *Task
 // @Description Schedule a task for future execution
 // @Tags tasks
 // @Accept json
-// @Produce json
+// @Produce  json
 // @Param task body dto.ScheduleTaskRequest true "Task details"
 // @Success 201 {object} dto.TaskResponse
 // @Failure 400 {object} dto.ErrorResponse
@@ -119,10 +119,11 @@ func (h *TaskHandler) ScheduleTask(c *gin.Context) {
 
 	info, err := h.client.ScheduleTask(taskType, asynqPayload, scheduledAt, opts...)
 	if err != nil {
-		// Optional: Rollback or mark the DB task as failed if enqueue fails
-		// For now, we just return an error. A more robust solution could involve
-		// updating the dbTask status to 'failed_to_enqueue'.
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		// Mark the DB task as 'enqueue_failed' so it can be reconciled later.
+		// This is a critical step for the self-healing mechanism.
+		log.Printf("[ERROR] Failed to enqueue task %s to Asynq after saving to DB. Marking as 'enqueue_failed'. Error: %v", taskID, err)
+		h.taskRepo.UpdateTaskStatus(c.Request.Context(), taskID.String(), dto.StatusEnqueueFailed)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to enqueue task", "details": err.Error()})
 		return
 	}
 
@@ -144,7 +145,7 @@ func (h *TaskHandler) ScheduleTask(c *gin.Context) {
 // @Description Enqueue a task for immediate processing
 // @Tags tasks
 // @Accept json
-// @Produce json
+// @Produce  json
 // @Param task body dto.EnqueueTaskRequest true "Task details"
 // @Success 201 {object} dto.TaskResponse
 // @Failure 400 {object} dto.ErrorResponse
@@ -221,9 +222,11 @@ func (h *TaskHandler) EnqueueTask(c *gin.Context) {
 
 	info, err := h.client.EnqueueTask(taskType, asynqPayload, opts...)
 	if err != nil {
-		// Optional: Rollback or mark the DB task as failed
-		// For now, we just return an error.
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		// Mark the DB task as 'enqueue_failed' so it can be reconciled later.
+		// This is a critical step for the self-healing mechanism.
+		log.Printf("[ERROR] Failed to enqueue task %s to Asynq after saving to DB. Marking as 'enqueue_failed'. Error: %v", taskID, err)
+		h.taskRepo.UpdateTaskStatus(c.Request.Context(), taskID.String(), dto.StatusEnqueueFailed)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to enqueue task", "details": err.Error()})
 		return
 	}
 
@@ -244,7 +247,7 @@ func (h *TaskHandler) EnqueueTask(c *gin.Context) {
 // @Summary Get task information
 // @Description Get detailed information about a task
 // @Tags tasks
-// @Produce json
+// @Produce  json
 // @Param id path string true "Task ID"
 // @Success 200 {object} dto.TaskResponse
 // @Failure 404 {object} dto.ErrorResponse
@@ -264,12 +267,26 @@ func (h *TaskHandler) GetTask(c *gin.Context) {
 	}
 	queue := h.getQueueNameFromPriority(dbTask.Priority)
 
+	// 2. Try to get real-time info from Asynq (Redis).
 	info, err := h.client.GetTaskInfo(queue, taskID)
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "task not found"})
+		// If not found in Redis, it might be inconsistent. Fallback to DB data.
+		// This honors the "DB as source of truth" principle.
+		log.Printf("[WARN] Task %s found in DB but not in Redis queue '%s'. Returning DB state. Error: %v", taskID, queue, err)
+		c.JSON(http.StatusOK, dto.TaskResponse{
+			ID:          dbTask.ID.String(),
+			Type:        "N/A (check DB)", // Type can be reconstructed if needed
+			Queue:       queue,
+			Status:      string(dbTask.Status) + " (from database)", // Indicate data is from DB
+			MaxRetries:  dbTask.MaxRetries,
+			Retried:     dbTask.RetryCount,
+			ScheduledAt: dbTask.ScheduledAt,
+			CreatedAt:   dbTask.CreatedAt,
+		})
 		return
 	}
 
+	// 3. If found in Redis, return the real-time info.
 	c.JSON(http.StatusOK, dto.TaskResponse{
 		ID:          info.ID,
 		Type:        info.Type,
@@ -285,7 +302,7 @@ func (h *TaskHandler) GetTask(c *gin.Context) {
 // @Summary List tasks
 // @Description List tasks filtered by queue and status
 // @Tags tasks
-// @Produce json
+// @Produce  json
 // @Param queue query string false "Queue name"
 // @Param status query string false "Task status (pending, scheduled, retry, archived)"
 // @Param page query int false "Page number" default(1)
@@ -296,9 +313,9 @@ func (h *TaskHandler) GetTask(c *gin.Context) {
 // @Router /scheduler/tasks [get]
 func (h *TaskHandler) ListTasks(c *gin.Context) {
 	// NOTE: This implementation lists tasks directly from Redis via Asynq's inspector.
-	// This is great for real-time status but is limited to what the inspector provides.
-	// An alternative approach is to query the `task_schedulers` table in your PostgreSQL database.
-	// Querying the database would allow for more complex filtering, sorting, and joining with other tables (e.g., `task_entities`),
+	// This is great for real-time status but is limited to what the inspector provides (e.g., no complex filtering or joining).
+	// A more powerful approach for historical data is to query the `task_schedulers` table in PostgreSQL.
+	// This would allow for richer filtering, sorting, and joining with other tables (e.g., `task_entities`),
 	// providing a richer, albeit potentially slightly delayed, view of the tasks.
 	queue := c.DefaultQuery("queue", "default")
 	status := c.DefaultQuery("status", string(dto.StatusPending))
@@ -552,7 +569,7 @@ func (h *TaskHandler) ResumeQueue(c *gin.Context) {
 // @Summary Get queue statistics
 // @Description Get statistics for all queues
 // @Tags stats
-// @Produce json
+// @Produce  json
 // @Success 200 {object} map[string]dto.QueueStats
 // @Failure 500 {object} dto.ErrorResponse
 // @Router /scheduler/stats/queues [get]
@@ -585,7 +602,7 @@ func (h *TaskHandler) GetQueueStats(c *gin.Context) {
 // @Summary Health check
 // @Description Check if the service is healthy
 // @Tags health
-// @Produce json
+// @Produce  json
 // @Success 200 {object} gin.H
 // @Router /health [get]
 func (h *TaskHandler) HealthCheck(c *gin.Context) {

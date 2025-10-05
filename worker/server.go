@@ -81,16 +81,14 @@ func NewServer(redisOpt asynq.RedisClientOpt, cfg *config.Config, db *gorm.DB, c
 		reconciliationProcessor: deps.ReconciliationProcessor,
 	}
 }
-func (s *Server) RunWithMiddleware() error {
-	// Wrap the mux with our custom middleware
-	var handler asynq.Handler = s.mux
-	handler = s.dbLoggingMiddleware(handler) // This middleware will now handle DB status updates
-	return s.asynqServer.Run(handler)
-}
 
 // Run starts the Asynq server and the periodic task scheduler.
 func (s *Server) Run() error {
 	// Trigger initial reconciliation on startup in a separate goroutine
+	// Wrap the mux with our custom middleware before running
+	var handler asynq.Handler = s.mux
+	handler = s.dbLoggingMiddleware(handler) // This middleware will now handle DB status updates
+
 	go func() {
 		log.Println("[RECONCILE_INIT] Performing initial task reconciliation on startup...")
 		if err := s.reconciliationProcessor.ProcessReconciliationTask(context.Background(), nil); err != nil {
@@ -103,7 +101,7 @@ func (s *Server) Run() error {
 			log.Fatalf("Could not run scheduler: %v", err)
 		}
 	}()
-	return s.RunWithMiddleware()
+	return s.asynqServer.Run(handler)
 }
 
 // Shutdown gracefully shuts down the server

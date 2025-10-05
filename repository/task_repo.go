@@ -8,7 +8,6 @@ import (
 	"gorm.io/gorm"
 )
 
-// TaskRepository menyediakan antarmuka untuk operasi database pada TaskScheduler.
 // TaskRepository provides an interface for database operations on TaskScheduler.
 type TaskRepository interface {
 	FindTaskByTaskID(ctx context.Context, taskID string) (*dto.TaskScheduler, error)
@@ -30,12 +29,12 @@ type taskRepository struct {
 	db *gorm.DB
 }
 
-// NewTaskRepository membuat instance baru dari TaskRepository.
+// NewTaskRepository creates a new instance of TaskRepository.
 func NewTaskRepository(db *gorm.DB) TaskRepository {
 	return &taskRepository{db: db}
 }
 
-// FindTaskByTaskID mencari task di database berdasarkan Asynq Task ID.
+// FindTaskByTaskID finds a task in the database by its Asynq Task ID (which is our primary key).
 func (r *taskRepository) FindTaskByTaskID(ctx context.Context, taskID string) (*dto.TaskScheduler, error) {
 	var task dto.TaskScheduler
 	if err := r.db.WithContext(ctx).Where("id = ?", taskID).First(&task).Error; err != nil {
@@ -44,7 +43,7 @@ func (r *taskRepository) FindTaskByTaskID(ctx context.Context, taskID string) (*
 	return &task, nil
 }
 
-// ListTasks mengambil daftar task dari database dengan filter dan paginasi.
+// ListTasks retrieves a list of tasks from the database with filtering and pagination.
 func (r *taskRepository) ListTasks(ctx context.Context, queue, status string, page, pageSize int) ([]dto.TaskScheduler, int64, error) {
 	var tasks []dto.TaskScheduler
 	var total int64
@@ -58,12 +57,12 @@ func (r *taskRepository) ListTasks(ctx context.Context, queue, status string, pa
 		query = query.Where("status = ?", status)
 	}
 
-	// Hitung total sebelum paginasi
+	// Count total records before pagination
 	if err := query.Count(&total).Error; err != nil {
 		return nil, 0, err
 	}
 
-	// Terapkan paginasi dan ambil data
+	// Apply pagination and retrieve the data
 	offset := (page - 1) * pageSize
 	err := query.Order("created_at DESC").Offset(offset).Limit(pageSize).Find(&tasks).Error
 
