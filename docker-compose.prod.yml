@@ -3,12 +3,14 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.prod
-    container_name: scheduler-app-prod
+    container_name: scheduler-app
+    env_file:
+      - .env
     ports:
       - "8080:8080"
     environment:
       - REDIS_URL=${REDIS_ADDR}
-      - DATABASE_URL=postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@{POSTGRES_HOST}:{POSTGRES_PORT}/${POSTGRES_DB}
+      - DATABASE_URL=postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@${POSTGRES_HOST}:${POSTGRES_PORT}/${POSTGRES_DB}
       - TZ=${TZ:-UTC}
     depends_on:
       - postgresql
@@ -16,9 +18,8 @@ services:
 
   postgresql:
     image: postgres:13-alpine
+    container_name: scheduler-postgresql
     environment:
-      - POSTGRES_HOST=${POSTGRES_HOST}
-      - POSTGRES_PORT=${POSTGRES_PORT}
       - POSTGRES_USER=${POSTGRES_USER}
       - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
       - POSTGRES_DB=${POSTGRES_DB}
@@ -26,17 +27,30 @@ services:
     volumes:
       - ./sql/init.sql:/docker-entrypoint-initdb.d/init.sql
       - postgres-data:/var/lib/postgresql/data
-    # In a real production setup, you might not expose the DB port publicly
     # ports:
     #   - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]  # Updated healthcheck
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
   redis:
-    image: redis:6-alpine
+    image: redis:7-alpine
+    container_name: scheduler-redis
+    command: redis-server --appendonly yes --appendfsync everysec
     environment:
       - TZ=${TZ:-UTC}
-    # You also might not expose the Redis port publicly
     # ports:
     #   - "6379:6379"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
 volumes:
   postgres-data:
+  redis-data:

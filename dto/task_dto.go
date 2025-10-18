@@ -50,11 +50,11 @@ type TaskScheduler struct {
 	FinishedAt   *time.Time     `json:"finished_at,omitempty"`
 	LastErrorAt  *time.Time     `json:"last_error_at,omitempty"`
 	CreatedAt    time.Time      `gorm:"default:now()" json:"created_at"`
-	CreatedBy    uuid.NullUUID  `json:"created_by,omitempty"`
+	CreatedBy    uuid.UUID      `json:"created_by,omitempty"`
 	UpdatedAt    time.Time      `gorm:"default:now()" json:"updated_at"`
-	UpdatedBy    uuid.NullUUID  `json:"updated_by,omitempty"`
+	UpdatedBy    *uuid.UUID     `json:"updated_by,omitempty"`
 	DeletedAt    gorm.DeletedAt `gorm:"index" json:"deleted_at,omitempty"`
-	DeletedBy    uuid.NullUUID  `json:"deleted_by,omitempty"`
+	DeletedBy    *uuid.UUID     `json:"deleted_by,omitempty"`
 
 	// Eager loading associations (optional but useful)
 	TaskEntity TaskEntity `gorm:"foreignKey:TaskEntityID" json:"task_entity,omitempty"`
@@ -79,11 +79,11 @@ type TaskEntity struct {
 	Name        string         `gorm:"type:varchar(50);unique;not null" json:"name"`
 	Description string         `gorm:"type:text" json:"description,omitempty"`
 	CreatedAt   time.Time      `gorm:"default:now()" json:"created_at"`
-	CreatedBy   uuid.NullUUID  `json:"created_by,omitempty"`
-	UpdatedAt   time.Time      `gorm:"default:now()" json:"updated_at"`
-	UpdatedBy   uuid.NullUUID  `json:"updated_by,omitempty"`
+	CreatedBy   *uuid.UUID     `json:"created_by,omitempty"`
+	UpdatedAt   *time.Time     `gorm:"default:now()" json:"updated_at"`
+	UpdatedBy   *uuid.UUID     `json:"updated_by,omitempty"`
 	DeletedAt   gorm.DeletedAt `gorm:"index" json:"deleted_at,omitempty"`
-	DeletedBy   uuid.NullUUID  `json:"deleted_by,omitempty"`
+	DeletedBy   *uuid.UUID     `json:"deleted_by,omitempty"`
 }
 
 func (TaskEntity) TableName() string {
@@ -96,11 +96,11 @@ type TaskAction struct {
 	Name        string         `gorm:"type:varchar(50);unique;not null" json:"name"`
 	Description string         `gorm:"type:text" json:"description,omitempty"`
 	CreatedAt   time.Time      `gorm:"default:now()" json:"created_at"`
-	CreatedBy   uuid.NullUUID  `json:"created_by,omitempty"`
+	CreatedBy   *uuid.UUID     `json:"created_by,omitempty"`
 	UpdatedAt   time.Time      `gorm:"default:now()" json:"updated_at"`
-	UpdatedBy   uuid.NullUUID  `json:"updated_by,omitempty"`
+	UpdatedBy   *uuid.UUID     `json:"updated_by,omitempty"`
 	DeletedAt   gorm.DeletedAt `gorm:"index" json:"deleted_at,omitempty"`
-	DeletedBy   uuid.NullUUID  `json:"deleted_by,omitempty"`
+	DeletedBy   *uuid.UUID     `json:"deleted_by,omitempty"`
 }
 
 func (TaskAction) TableName() string {
@@ -122,15 +122,16 @@ type TaskResponse struct {
 	FinishedAt     *time.Time     `json:"finished_at,omitempty"`
 	LastErrorAt    *time.Time     `json:"last_error_at,omitempty"`
 	CreatedAt      time.Time      `json:"created_at"`
-	CreatedBy      uuid.NullUUID  `json:"created_by,omitempty"`
-	UpdatedAt      time.Time      `json:"updated_at"`
-	UpdatedBy      uuid.NullUUID  `json:"updated_by,omitempty"`
+	CreatedBy      *uuid.UUID     `json:"created_by,omitempty"`
+	UpdatedAt      *time.Time     `json:"updated_at"`
+	UpdatedBy      *uuid.UUID     `json:"updated_by,omitempty"`
 	DeletedAt      gorm.DeletedAt `json:"deleted_at,omitempty"`
-	DeletedBy      uuid.NullUUID  `json:"deleted_by,omitempty"`
+	DeletedBy      *uuid.UUID     `json:"deleted_by,omitempty"`
 }
 
 // GenericScheduleRequest defines the structure for the generic task scheduling endpoint.
 type GenericScheduleRequest struct {
+	UserID      uuid.UUID      `json:"user_id" binding:"required" example:"00000000-0000-0000-0000-000000000001"`
 	Entity      string         `json:"entity" binding:"required" example:"PRODUCT"`
 	Action      string         `json:"action" binding:"required" example:"CREATE"`
 	Payload     datatypes.JSON `json:"payload" binding:"required" swaggertype:"object"`

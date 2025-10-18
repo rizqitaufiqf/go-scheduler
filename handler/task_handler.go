@@ -75,6 +75,7 @@ func (h *TaskHandler) ScheduleGenericTask(c *gin.Context) {
 		Payload:      req.Payload,
 		ScheduledAt:  req.ScheduledAt,
 		Status:       dto.StatusPending,
+		CreatedBy:    req.UserID,
 	}
 	// Apply optional parameters if they were provided.
 	if req.MaxRetries != nil {

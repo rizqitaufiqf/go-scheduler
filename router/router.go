@@ -10,18 +10,39 @@ import (
 	"gorm.io/gorm"
 )
 
-func SetupRouter(db *gorm.DB, s *repo.Scheduler) *gin.Engine {
+func SetupRouter(
+	db *gorm.DB,
+	scheduler *repo.Scheduler,
+) (*gin.Engine, repo.NotificationRepository, *handler.SSEManager) {
 	r := gin.Default()
 
 	// Create repositories
 	productRepo := repo.NewProductRepository(db)
+	notificationRepo := repo.NewNotificationRepository(db) // This will be returned
 
 	// Create handlers
 	productHandler := handler.NewProductHandler(productRepo)
-	taskHandler := handler.NewTaskHandler(db, s)
+	taskHandler := handler.NewTaskHandler(db, scheduler)
+	sseManager := handler.GetSSEManager() // This will be returned
+	sseHandler := handler.NewSSEHandler(notificationRepo, sseManager)
 
 	// Swagger endpoint
 	r.GET("/swagger/*any", ginSwagger.WrapHandler(swaggerFiles.Handler))
+
+	// CORS middleware for SSE support
+	r.Use(func(c *gin.Context) {
+		c.Writer.Header().Set("Access-Control-Allow-Origin", "*")
+		c.Writer.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+		c.Writer.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+		c.Writer.Header().Set("Access-Control-Expose-Headers", "Content-Type")
+
+		if c.Request.Method == "OPTIONS" {
+			c.AbortWithStatus(204)
+			return
+		}
+
+		c.Next()
+	})
 
 	// Main API group
 	apiV1 := r.Group("/api/v1")
@@ -53,5 +74,16 @@ func SetupRouter(db *gorm.DB, s *repo.Scheduler) *gin.Engine {
 		schedulerRoutes.POST("/tasks/:id/retry", taskHandler.RetryFailedTask)
 	}
 
-	return r
+	notifications := apiV1.Group("/notifications")
+	{
+		// SSE endpoint - establishes long-lived connection
+		notifications.GET("/stream", sseHandler.HandleSSE)
+
+		// REST endpoints for notifications
+		notifications.GET("", sseHandler.GetNotifications)    // Get user's notifications
+		notifications.PUT("/:id/read", sseHandler.MarkAsRead) // Mark notification as read
+		notifications.GET("/stats", sseHandler.GetStats)      // Get SSE statistics
+	}
+
+	return r, notificationRepo, sseManager
 }

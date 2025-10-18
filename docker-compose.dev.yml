@@ -4,14 +4,15 @@ services:
       context: .
       dockerfile: Dockerfile.dev
     container_name: scheduler-app-dev
+    env_file:
+      - .env
     ports:
       - "8080:8080"
     volumes:
-      # Mount local source code into the container for hot-reloading
       - .:/app
     environment:
       - REDIS_URL=${REDIS_ADDR}
-      - DATABASE_URL=postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@{POSTGRES_HOST}:{POSTGRES_PORT}/${POSTGRES_DB}
+      - DATABASE_URL=postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@${POSTGRES_HOST}:${POSTGRES_PORT}/${POSTGRES_DB}
       - TZ=${TZ:-UTC}
     depends_on:
       - postgresql
@@ -19,9 +20,8 @@ services:
 
   postgresql:
     image: postgres:13-alpine
+    container_name: scheduler-postgresql
     environment:
-      - POSTGRES_HOST=${POSTGRES_HOST}
-      - POSTGRES_PORT=${POSTGRES_PORT}
       - POSTGRES_USER=${POSTGRES_USER}
       - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
       - POSTGRES_DB=${POSTGRES_DB}
@@ -31,39 +31,28 @@ services:
       - postgres-data:/var/lib/postgresql/data
     ports:
       - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]  # Updated healthcheck
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
   redis:
-    image: redis:6-alpine
+    image: redis:7-alpine
+    container_name: scheduler-redis
+    command: redis-server --appendonly yes --appendfsync everysec
     environment:
       - TZ=${TZ:-UTC}
     ports:
       - "6379:6379"
-
-  # pgadmin:
-  #   image: dpage/pgadmin4:latest
-  #   container_name: pgadmin-dev
-  #   environment:
-  #     - PGADMIN_DEFAULT_EMAIL=admin@example.com
-  #     - PGADMIN_DEFAULT_PASSWORD=admin
-  #     - TZ=${TZ:-UTC}
-  #   ports:
-  #     - "5050:80"
-  #   depends_on:
-  #     - postgresql
-  #   volumes:
-  #     - pgadmin-data:/var/lib/pgadmin
-
-  # redisinsight:
-  #   image: redislabs/redisinsight:latest
-  #   container_name: redisinsight-dev
-  #   environment:
-  #     - TZ=${TZ:-UTC}
-  #   ports:
-  #     - "8001:8001"
-  #   volumes:
-  #     - redisinsight-data:/db
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
 volumes:
   postgres-data:
-  pgadmin-data:
-  redisinsight-data:
+  redis-data:

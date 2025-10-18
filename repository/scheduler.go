@@ -191,7 +191,7 @@ func (r *Scheduler) PauseTask(taskID uuid.UUID) (*dto.TaskResponse, error) {
 		FinishedAt:     task.FinishedAt,
 		LastErrorAt:    task.LastErrorAt,
 		CreatedAt:      task.CreatedAt,
-		UpdatedAt:      task.UpdatedAt,
+		UpdatedAt:      &task.UpdatedAt,
 	}
 	return response, nil
 }
@@ -310,7 +310,7 @@ func (r *Scheduler) ResumeTask(taskID uuid.UUID) (*dto.TaskResponse, error) {
 		FinishedAt:     task.FinishedAt,
 		LastErrorAt:    task.LastErrorAt,
 		CreatedAt:      task.CreatedAt,
-		UpdatedAt:      task.UpdatedAt,
+		UpdatedAt:      &task.UpdatedAt,
 	}
 	return response, nil
 }
@@ -361,7 +361,7 @@ func (r *Scheduler) CancelTask(taskID uuid.UUID) (*dto.TaskResponse, error) {
 		LastErrorAt:    task.LastErrorAt,
 		Status:         task.Status,
 		Result:         "Task was canceled by the user.",
-		UpdatedAt:      task.UpdatedAt,
+		UpdatedAt:      &task.UpdatedAt,
 	}
 	return response, nil
 }

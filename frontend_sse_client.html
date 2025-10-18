@@ -1,0 +1,451 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Scheduler Notifications</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }
+
+        .container {
+            max-width: 800px;
+            margin: 0 auto;
+        }
+
+        .header {
+            background: white;
+            padding: 20px;
+            border-radius: 12px;
+            margin-bottom: 20px;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+        }
+
+        h1 {
+            color: #333;
+            margin-bottom: 10px;
+        }
+
+        .status {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            margin-top: 15px;
+        }
+
+        .status-indicator {
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            background: #ef4444;
+        }
+
+        .status-indicator.connected {
+            background: #10b981;
+            animation: pulse 2s infinite;
+        }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+
+        .controls {
+            background: white;
+            padding: 20px;
+            border-radius: 12px;
+            margin-bottom: 20px;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+        }
+
+        .input-group {
+            margin-bottom: 15px;
+        }
+
+        label {
+            display: block;
+            margin-bottom: 5px;
+            color: #666;
+            font-weight: 500;
+        }
+
+        input {
+            width: 100%;
+            padding: 10px;
+            border: 2px solid #e5e7eb;
+            border-radius: 8px;
+            font-size: 14px;
+        }
+
+        button {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border: none;
+            padding: 12px 24px;
+            border-radius: 8px;
+            cursor: pointer;
+            font-weight: 600;
+            transition: transform 0.2s;
+            margin-right: 10px;
+        }
+
+        button:hover {
+            transform: translateY(-2px);
+        }
+
+        button:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+            transform: none;
+        }
+
+        .notifications {
+            background: white;
+            border-radius: 12px;
+            padding: 20px;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+        }
+
+        .notification {
+            background: #f9fafb;
+            border-left: 4px solid #667eea;
+            padding: 15px;
+            margin-bottom: 15px;
+            border-radius: 8px;
+            animation: slideIn 0.3s ease-out;
+        }
+
+        .notification.success {
+            border-left-color: #10b981;
+        }
+
+        .notification.error {
+            border-left-color: #ef4444;
+        }
+
+        @keyframes slideIn {
+            from {
+                opacity: 0;
+                transform: translateX(-20px);
+            }
+            to {
+                opacity: 1;
+                transform: translateX(0);
+            }
+        }
+
+        .notification-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 8px;
+        }
+
+        .notification-title {
+            font-weight: 600;
+            color: #111827;
+        }
+
+        .notification-time {
+            font-size: 12px;
+            color: #6b7280;
+        }
+
+        .notification-message {
+            color: #4b5563;
+            margin-bottom: 8px;
+        }
+
+        .notification-meta {
+            font-size: 12px;
+            color: #9ca3af;
+        }
+
+        .notification-actions {
+            margin-top: 10px;
+        }
+
+        .notification-actions button {
+            padding: 6px 12px;
+            font-size: 12px;
+        }
+
+        .empty-state {
+            text-align: center;
+            padding: 40px;
+            color: #9ca3af;
+        }
+
+        .badge {
+            display: inline-block;
+            padding: 4px 8px;
+            border-radius: 12px;
+            font-size: 11px;
+            font-weight: 600;
+            margin-left: 8px;
+        }
+
+        .badge.success {
+            background: #d1fae5;
+            color: #065f46;
+        }
+
+        .badge.error {
+            background: #fee2e2;
+            color: #991b1b;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🔔 Scheduler Notifications</h1>
+            <p>Real-time notifications menggunakan Redis Streams + SSE</p>
+            <div class="status">
+                <div class="status-indicator" id="statusIndicator"></div>
+                <span id="statusText">Disconnected</span>
+            </div>
+        </div>
+
+        <div class="controls">
+            <div class="input-group">
+                <label for="userIdInput">User ID</label>
+                <input type="string" id="userIdInput" placeholder="Enter your user ID" value="00000000-0000-0000-0000-000000000001">
+            </div>
+            <button id="connectBtn" onclick="connectSSE()">Connect</button>
+            <button id="disconnectBtn" onclick="disconnectSSE()" disabled>Disconnect</button>
+            <button onclick="clearNotifications()">Clear All</button>
+        </div>
+
+        <div class="notifications">
+            <h2>Notifications</h2>
+            <div id="notificationsList">
+                <div class="empty-state">
+                    No notifications yet. Connect to start receiving notifications.
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let eventSource = null;
+        let userId = null;
+
+        function connectSSE() {
+            userId = document.getElementById('userIdInput').value;
+            
+            if (!userId) {
+                alert('Please enter a user ID');
+                return;
+            }
+
+            if (eventSource) {
+                eventSource.close();
+            }
+
+            // Connect to SSE endpoint
+            const url = `http://localhost:8080/api/v1/notifications/stream?user_id=${userId}`;
+            eventSource = new EventSource(url);
+
+            eventSource.onopen = () => {
+                console.log('✅ SSE Connection opened');
+                updateStatus('connected');
+                document.getElementById('connectBtn').disabled = true;
+                document.getElementById('disconnectBtn').disabled = false;
+            };
+
+            eventSource.onmessage = (event) => {
+                console.log('📨 Received notification:', event.data);
+                
+                try {
+                    const notification = JSON.parse(event.data);
+                    addNotification(notification);
+                    playNotificationSound();
+                    showBrowserNotification(notification);
+                } catch (error) {
+                    console.error('Failed to parse notification:', error);
+                }
+            };
+
+            eventSource.onerror = (error) => {
+                console.error('❌ SSE Error:', error);
+                updateStatus('retrying');
+                
+                // Auto-reconnect after 5 seconds
+                setTimeout(() => {
+                    if (eventSource && eventSource.readyState === EventSource.CLOSED) {
+                        console.log('🔄 Attempting to reconnect...');
+                        connectSSE();
+                    }
+                }, 5000);
+            };
+        }
+
+        function disconnectSSE() {
+            if (eventSource) {
+                eventSource.close();
+                eventSource = null;
+                updateStatus('disconnected');
+                document.getElementById('connectBtn').disabled = false;
+                document.getElementById('disconnectBtn').disabled = true;
+                console.log('🔌 SSE Connection closed');
+            }
+        }
+
+        function updateStatus(status) {
+            const indicator = document.getElementById('statusIndicator');
+            const text = document.getElementById('statusText');
+            indicator.classList.remove('connected');
+            
+            if (status === 'connected') {
+                indicator.classList.add('connected');
+                text.textContent = `Connected (User ID: ${userId})`;
+                text.style.color = '#10b981';
+            } else if (status === 'retrying') {
+                text.textContent = 'Connection lost. Retrying...';
+                text.style.color = '#f59e0b';
+            }
+            else { // disconnected
+                text.textContent = 'Disconnected';
+                text.style.color = '#ef4444';
+            }
+        }
+
+        function addNotification(notification) {
+            const list = document.getElementById('notificationsList');
+            
+            // Remove empty state if exists
+            const emptyState = list.querySelector('.empty-state');
+            if (emptyState) {
+                emptyState.remove();
+            }
+
+            const notifElement = document.createElement('div');
+            notifElement.className = `notification ${notification.type === 'task_completed' ? 'success' : 'error'}`;
+            notifElement.id = `notif-${notification.id}`;
+
+            const time = new Date(notification.created_at).toLocaleString();
+            const typeLabel = notification.type === 'task_completed' ? 'Success' : 'Failed';
+            const badgeClass = notification.type === 'task_completed' ? 'success' : 'error';
+
+            notifElement.innerHTML = `
+                <div class="notification-header">
+                    <div>
+                        <span class="notification-title">${notification.title}</span>
+                        <span class="badge ${badgeClass}">${typeLabel}</span>
+                    </div>
+                    <span class="notification-time">${time}</span>
+                </div>
+                <div class="notification-message">${notification.message}</div>
+                <div class="notification-meta">
+                    Task ID: ${notification.task_id}
+                </div>
+                <div class="notification-actions">
+                    <button onclick="markAsRead('${notification.id}')">Mark as Read</button>
+                </div>
+            `;
+
+            // Insert at the top
+            list.insertBefore(notifElement, list.firstChild);
+        }
+
+        function markAsRead(notificationId) {
+            fetch(`http://localhost:8080/api/v1/notifications/${notificationId}/read`, {
+                method: 'PUT',
+            })
+            .then(response => response.json())
+            .then(data => {
+                console.log('✅ Notification marked as read:', data);
+                
+                // Update UI
+                const notifElement = document.getElementById(`notif-${notificationId}`);
+                if (notifElement) {
+                    notifElement.style.opacity = '0.6';
+                    const button = notifElement.querySelector('button');
+                    button.textContent = '✓ Read';
+                    button.disabled = true;
+                }
+            })
+            .catch(error => {
+                console.error('❌ Failed to mark as read:', error);
+                alert('Failed to mark notification as read');
+            });
+        }
+
+        function clearNotifications() {
+            const list = document.getElementById('notificationsList');
+            list.innerHTML = '<div class="empty-state">No notifications yet.</div>';
+        }
+
+        function playNotificationSound() {
+            try {
+                const audioContext = new (window.AudioContext || window.webkitAudioContext)();
+                const oscillator = audioContext.createOscillator();
+                const gainNode = audioContext.createGain();
+
+                oscillator.connect(gainNode);
+                gainNode.connect(audioContext.destination);
+
+                oscillator.frequency.value = 800;
+                oscillator.type = 'sine';
+
+                gainNode.gain.setValueAtTime(0.3, audioContext.currentTime);
+                gainNode.gain.exponentialRampToValueAtTime(0.01, audioContext.currentTime + 0.5);
+
+                oscillator.start(audioContext.currentTime);
+                oscillator.stop(audioContext.currentTime + 0.5);
+            } catch (error) {
+                console.log('Could not play notification sound:', error);
+            }
+        }
+
+        function showBrowserNotification(notification) {
+            if (!("Notification" in window)) {
+                return;
+            }
+
+            if (Notification.permission === "granted") {
+                new Notification(notification.title, {
+                    body: notification.message,
+                    icon: '🔔',
+                    tag: `notification-${notification.id}`
+                });
+            } else if (Notification.permission !== "denied") {
+                Notification.requestPermission().then(permission => {
+                    if (permission === "granted") {
+                        new Notification(notification.title, {
+                            body: notification.message,
+                            icon: '🔔',
+                            tag: `notification-${notification.id}`
+                        });
+                    }
+                });
+            }
+        }
+
+        // Request notification permission on load
+        window.addEventListener('load', () => {
+            if ("Notification" in window && Notification.permission === "default") {
+                Notification.requestPermission();
+            }
+        });
+
+        // Cleanup on page unload
+        window.addEventListener('beforeunload', () => {
+            if (eventSource) {
+                eventSource.close();
+            }
+        });
+    </script>
+</body>
+</html>

@@ -37,10 +37,11 @@ type Worker struct {
 	maxFailRefresh        int
 	backoffBaseDelay      time.Duration
 	backoffMaxDelay       time.Duration
+	notificationPublisher *NotificationPublisher
 }
 
 // NewWorker creates and initializes a new Worker instance.
-func NewWorker(ctx context.Context, db *gorm.DB, redis *redis.Client, cfg *config.Config) *Worker {
+func NewWorker(ctx context.Context, db *gorm.DB, redis *redis.Client, notificaionPublisher *NotificationPublisher, cfg *config.Config) *Worker {
 	w := &Worker{
 		db:           db,
 		redis:        redis,
@@ -55,13 +56,14 @@ func NewWorker(ctx context.Context, db *gorm.DB, redis *redis.Client, cfg *confi
 		maxFailRefresh:        cfg.MaxFailRefresh,
 		backoffBaseDelay:      cfg.BackoffBaseDelay,
 		backoffMaxDelay:       cfg.BackoffMaxDelay,
+		notificationPublisher: notificaionPublisher,
 	}
 	w.registerProcessors()
 	return w
 }
 
 // Start begins the worker's processing loop.
-func (w *Worker) Start() {
+func (w *Worker) Start(ctx context.Context) {
 	log.Printf("Starting worker with concurrency=%d and poll_interval=%s...", w.concurrency, w.pollInterval)
 	// On startup, run a one-time reconciliation to recover tasks from a potential previous crash.
 	w.reconcileTasks()
@@ -73,7 +75,7 @@ func (w *Worker) Start() {
 	defer ticker.Stop()
 
 	for range ticker.C {
-		w.processDueTasks()
+		w.processDueTasks(ctx)
 	}
 }
 
@@ -98,7 +100,7 @@ func (w *Worker) reconcileMissingQueueTasks() {
 	var tasks []dto.TaskScheduler
 	// Look for tasks in a queueable state scheduled within the last 24 hours.
 	// This window prevents checking very old, likely irrelevant tasks.
-	err := w.db.WithContext(w.ctx).
+	err := w.db.WithContext(w.ctx).Model(&dto.TaskScheduler{}).
 		Where("status IN ? AND scheduled_at > ?",
 			[]dto.TaskStatus{dto.StatusPending, dto.StatusRetrying},
 			time.Now().Add(-24*time.Hour),
@@ -193,7 +195,7 @@ func (w *Worker) reconcileTasks() {
 }
 
 // processDueTasks is the main polling function. It attempts to claim and dispatch due tasks from the queue.
-func (w *Worker) processDueTasks() {
+func (w *Worker) processDueTasks(ctx context.Context) {
 	// If the concurrency limit is already reached, don't bother trying to claim more tasks.
 	if len(w.sem) == cap(w.sem) {
 		log.Println("Concurrency limit reached, pausing claims for this tick.")
@@ -255,13 +257,13 @@ func (w *Worker) processDueTasks() {
 			w.sem <- struct{}{} // Acquire a semaphore slot
 			go func(id string, lockToken string) {
 				defer func() { <-w.sem }() // Release semaphore slot
-				w.executeTask(id, lockToken)
+				w.executeTask(ctx, id, lockToken)
 			}(taskIDStr, token)
 		}
 	}
 }
 
-func (w *Worker) executeTask(taskIDStr string, token string) {
+func (w *Worker) executeTask(ctx context.Context, taskIDStr string, token string) {
 	now := time.Now()
 	lockKey := repo.TaskLockKey(taskIDStr)
 
@@ -390,6 +392,21 @@ func (w *Worker) executeTask(taskIDStr string, token string) {
 				log.Printf("Error saving failed task %s: %v", task.ID, err)
 			}
 			log.Printf("Task %s failed permanently after %d attempts: %v", task.ID, task.RetryCount, procErr)
+
+			// 🔔 Publish FAILURE notification to Redis Stream
+			if w.notificationPublisher != nil {
+				notifErr := w.notificationPublisher.PublishTaskFailedNotification(
+					ctx,
+					task.CreatedBy,
+					task.ID,
+					task.TaskEntity.Name,
+					task.TaskAction.Name,
+					procErr.Error(),
+				)
+				if notifErr != nil {
+					log.Printf("⚠️  Failed to publish failure notification: %v", notifErr)
+				}
+			}
 			return
 		}
 
@@ -441,6 +458,20 @@ func (w *Worker) executeTask(taskIDStr string, token string) {
 	if err := w.db.WithContext(w.ctx).Save(&task).Error; err != nil {
 		log.Printf("Error saving completed status for task %s: %v", task.ID, err)
 		return
+	}
+
+	// 🔔 Publish SUCCESS notification to Redis Stream
+	if w.notificationPublisher != nil {
+		notifErr := w.notificationPublisher.PublishTaskCompletedNotification(
+			ctx,
+			task.CreatedBy,
+			task.ID,
+			task.TaskEntity.Name,
+			task.TaskAction.Name,
+		)
+		if notifErr != nil {
+			log.Printf("⚠️  Failed to publish success notification: %v", notifErr)
+		}
 	}
 	log.Printf("Task %s completed successfully", task.ID)
 }
