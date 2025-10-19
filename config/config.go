@@ -4,86 +4,140 @@ import (
 	"fmt"
 	"os"
 	"strconv"
-	"time"
 
 	"github.com/joho/godotenv"
 )
 
-// Config holds all configuration for the application
+// Config holds all configuration for the application.
 type Config struct {
-	DBSource              string
-	RedisURL              string
-	WorkerConcurrency     int
-	WorkerPollInterval    time.Duration
-	LockTTL               time.Duration
-	PeriodicReconInterval time.Duration
-	MaxFailRefresh        int
-	BackoffBaseDelay      time.Duration
-	BackoffMaxDelay       time.Duration
+	// Raw values / primitives
+	Dsn              string
+	PostgresUser     string
+	PostgresPassword string
+	PostgresDB       string
+	PostgresHost     string
+	PostgresPort     string
+	RedisAddr        string
+	TZ               string
+
+	// Worker numeric configs (seconds / counts)
+	MaxFailRefresh               int
+	WorkerConcurrency            int
+	WorkerPollIntervalSeconds    int
+	LockTTLSeconds               int
+	PeriodicReconIntervalSeconds int
+	BackoffBaseDelaySeconds      int
+	BackoffMaxDelaySeconds       int
+
+	// Notification configs
+	NotificationEnabled            bool
+	NotificationRedisChannel       string
+	NotificationRetentionDays      int
+	NotificationUsePostgresSession bool
+
+	// JWT configs
+	JWTSecret      string
+	JWTExpiryHours int
+
+	// WebSocket configs
+	WSReadBufferSize      int
+	WSWriteBufferSize     int
+	WSPingIntervalSeconds int
+	WSPongTimeoutSeconds  int
+	WSMaxMessageSize      int
 }
 
-// LoadConfig loads configuration from .env file
+const (
+	// defaults
+	defaultWorkerConcurrency         = 10
+	defaultWorkerPollIntervalSeconds = 10
+	defaultLockTTLSeconds            = 300
+	defaultPeriodicReconSeconds      = 300
+	defaultMaxFailRefresh            = 3
+	defaultBackoffBaseSeconds        = 5
+	defaultBackoffMaxSeconds         = 300
+
+	defaultPostgresUser = "user"
+	defaultPostgresPass = "password"
+	defaultPostgresDB   = "scheduler_db"
+	defaultPostgresHost = "postgresql"
+	defaultPostgresPort = "5432"
+	defaultRedisAddr    = "redis:6379"
+	defaultTZ           = "Asia/Jakarta"
+)
+
 func LoadConfig() (*Config, error) {
-	if err := godotenv.Load(); err != nil {
-		// Don't fail if .env is not present, it might be set in the environment
+	_ = godotenv.Load()
+
+	cfg := &Config{
+		// Raw database / redis / tz
+		PostgresUser:     getEnv("POSTGRES_USER", defaultPostgresUser),
+		PostgresPassword: getEnv("POSTGRES_PASSWORD", defaultPostgresPass),
+		PostgresDB:       getEnv("POSTGRES_DB", defaultPostgresDB),
+		PostgresHost:     getEnv("POSTGRES_HOST", defaultPostgresHost),
+		PostgresPort:     getEnv("POSTGRES_PORT", defaultPostgresPort),
+		RedisAddr:        getEnv("REDIS_ADDR", defaultRedisAddr),
+		TZ:               getEnv("TZ", defaultTZ),
+		// Worker counts / timeouts (seconds)
+		WorkerConcurrency:            getEnvAsInt("WORKER_CONCURRENCY", defaultWorkerConcurrency),
+		WorkerPollIntervalSeconds:    getEnvAsInt("WORKER_POLL_INTERVAL_SECONDS", defaultWorkerPollIntervalSeconds),
+		LockTTLSeconds:               getEnvAsInt("LOCK_TTL_SECONDS", defaultLockTTLSeconds),
+		PeriodicReconIntervalSeconds: getEnvAsInt("PERIODIC_RECON_INTERVAL_SECONDS", defaultPeriodicReconSeconds),
+		MaxFailRefresh:               getEnvAsInt("MAX_FAIL_REFRESH", defaultMaxFailRefresh),
+		BackoffBaseDelaySeconds:      getEnvAsInt("BACKOFF_BASE_DELAY_SECONDS", defaultBackoffBaseSeconds),
+		BackoffMaxDelaySeconds:       getEnvAsInt("BACKOFF_MAX_DELAY_SECONDS", defaultBackoffMaxSeconds),
+
+		// Notification
+		NotificationEnabled:            getEnvAsBool("NOTIFICATION_ENABLED", true),
+		NotificationRedisChannel:       getEnv("NOTIFICATION_REDIS_CHANNEL", "notification-dev"),
+		NotificationRetentionDays:      getEnvAsInt("NOTIFICATION_RETENTION_DAYS", 30),
+		NotificationUsePostgresSession: getEnvAsBool("NOTIFICATION_USE_POSTGRES_SESSION", false),
+
+		// JWT
+		JWTSecret:      getEnv("JWT_SECRET", "change-this-secret-key"),
+		JWTExpiryHours: getEnvAsInt("JWT_EXPIRY_HOURS", 24),
+
+		// WebSocket
+		WSReadBufferSize:      getEnvAsInt("WS_READ_BUFFER_SIZE", 1024),
+		WSWriteBufferSize:     getEnvAsInt("WS_WRITE_BUFFER_SIZE", 1024),
+		WSPingIntervalSeconds: getEnvAsInt("WS_PING_INTERVAL_SECONDS", 30),
+		WSPongTimeoutSeconds:  getEnvAsInt("WS_PONG_TIMEOUT_SECONDS", 60),
+		WSMaxMessageSize:      getEnvAsInt("WS_MAX_MESSAGE_SIZE", 512),
 	}
 
-	// --- Database & Redis Configuration ---
-	dsn := fmt.Sprintf("host=%s user=%s password=%s dbname=%s port=%s sslmode=disable TimeZone=%s",
-		os.Getenv("POSTGRES_HOST"),
-		os.Getenv("POSTGRES_USER"),
-		os.Getenv("POSTGRES_PASSWORD"),
-		os.Getenv("POSTGRES_DB"),
-		os.Getenv("POSTGRES_PORT"),
-		os.Getenv("TZ"),
-	)
+	// Construct DSN after initializing other fields
+	cfg.Dsn = fmt.Sprintf("host=%s user=%s password=%s dbname=%s port=%s sslmode=disable TimeZone=%s",
+		cfg.PostgresHost,
+		cfg.PostgresUser,
+		cfg.PostgresPassword,
+		cfg.PostgresDB,
+		cfg.PostgresPort,
+		cfg.TZ)
 
-	// --- Worker Configuration ---
-	workerConcurrency, err := strconv.Atoi(os.Getenv("WORKER_CONCURRENCY"))
-	if err != nil || workerConcurrency <= 0 {
-		workerConcurrency = 10 // Default value
+	return cfg, nil
+}
+
+func getEnv(key, def string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
 	}
+	return def
+}
 
-	pollIntervalSeconds, err := strconv.Atoi(os.Getenv("WORKER_POLL_INTERVAL_SECONDS"))
-	if err != nil || pollIntervalSeconds <= 0 {
-		pollIntervalSeconds = 10 // Default value
+func getEnvAsInt(key string, def int) int {
+	if v := os.Getenv(key); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			return n
+		}
 	}
+	return def
+}
 
-	// --- Task Lock & Resilience Configuration ---
-	lockTTLSeconds, err := strconv.Atoi(os.Getenv("LOCK_TTL_SECONDS"))
-	if err != nil || lockTTLSeconds <= 0 {
-		lockTTLSeconds = 300 // Default: 5 minutes
+func getEnvAsBool(key string, def bool) bool {
+	if v := os.Getenv(key); v != "" {
+		if b, err := strconv.ParseBool(v); err == nil {
+			return b
+		}
 	}
-
-	reconIntervalSeconds, err := strconv.Atoi(os.Getenv("PERIODIC_RECON_INTERVAL_SECONDS"))
-	if err != nil || reconIntervalSeconds <= 0 {
-		reconIntervalSeconds = 300 // Default: 5 minutes
-	}
-
-	maxFailRefresh, err := strconv.Atoi(os.Getenv("MAX_FAIL_REFRESH"))
-	if err != nil || maxFailRefresh <= 0 {
-		maxFailRefresh = 3 // Default value
-	}
-
-	backoffBaseSeconds, err := strconv.Atoi(os.Getenv("BACKOFF_BASE_DELAY_SECONDS"))
-	if err != nil || backoffBaseSeconds <= 0 {
-		backoffBaseSeconds = 5 // Default value
-	}
-
-	backoffMaxSeconds, err := strconv.Atoi(os.Getenv("BACKOFF_MAX_DELAY_SECONDS"))
-	if err != nil || backoffMaxSeconds <= 0 {
-		backoffMaxSeconds = 300 // Default: 5 minutes
-	}
-
-	return &Config{
-		DBSource:              dsn,
-		RedisURL:              os.Getenv("REDIS_ADDR"),
-		WorkerConcurrency:     workerConcurrency,
-		WorkerPollInterval:    time.Duration(pollIntervalSeconds) * time.Second,
-		LockTTL:               time.Duration(lockTTLSeconds) * time.Second,
-		PeriodicReconInterval: time.Duration(reconIntervalSeconds) * time.Second,
-		MaxFailRefresh:        maxFailRefresh,
-		BackoffBaseDelay:      time.Duration(backoffBaseSeconds) * time.Second,
-		BackoffMaxDelay:       time.Duration(backoffMaxSeconds) * time.Second,
-	}, nil
+	return def
 }

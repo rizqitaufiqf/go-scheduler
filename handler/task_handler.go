@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"time"
 
@@ -23,6 +24,25 @@ func NewTaskHandler(db *gorm.DB, s *repo.Scheduler) *TaskHandler {
 	return &TaskHandler{db: db, scheduler: s}
 }
 
+// getAuthenticatedUserID safely extracts the userID from the Gin context.
+// It returns false if the value is missing or not of the expected type.
+func getAuthenticatedUserID(c *gin.Context) (uuid.UUID, bool) {
+	userIDVal, exists := c.Get("user_id")
+	if !exists {
+		c.JSON(http.StatusUnauthorized, dto.ErrorResponse{Error: "user_id not found in context"})
+		return uuid.Nil, false
+	}
+
+	userIDStr, ok := userIDVal.(string)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, dto.ErrorResponse{Error: "user_id in context is not a string"})
+		return uuid.Nil, false
+	}
+
+	parsedUUID, err := uuid.Parse(userIDStr)
+	return parsedUUID, err == nil
+}
+
 // ScheduleGenericTask schedules any valid task based on the provided entity and action names.
 // @Summary      Schedule a generic task
 // @Description  Schedules any valid task by providing entity, action, and payload in the request body.
@@ -30,6 +50,7 @@ func NewTaskHandler(db *gorm.DB, s *repo.Scheduler) *TaskHandler {
 // @Accept       json
 // @Produce      json
 // @Param        task  body      dto.GenericScheduleRequest  true  "Generic Task Scheduling Details"
+// @Security     BearerAuth
 // @Success      202   {object}  dto.TaskScheduler
 // @Failure      400   {object}  dto.ErrorResponse
 // @Failure      404   {object}  dto.ErrorResponse "If entity or action is not found"
@@ -41,6 +62,12 @@ func (h *TaskHandler) ScheduleGenericTask(c *gin.Context) {
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, dto.ErrorResponse{Error: err.Error()})
 		return
+	}
+
+	// Get the authenticated user's ID from the JWT token in the context.
+	userID, ok := getAuthenticatedUserID(c)
+	if !ok {
+		return // Error response is already sent by the helper.
 	}
 
 	// Validate entity & action from master tables
@@ -74,6 +101,7 @@ func (h *TaskHandler) ScheduleGenericTask(c *gin.Context) {
 		TaskActionID: action.ID,
 		Payload:      req.Payload,
 		ScheduledAt:  req.ScheduledAt,
+		CreatedBy:    uuid.NullUUID{UUID: userID, Valid: true}, // Associate task with the user
 		Status:       dto.StatusPending,
 	}
 	// Apply optional parameters if they were provided.
@@ -128,6 +156,7 @@ func (h *TaskHandler) ScheduleGenericTask(c *gin.Context) {
 		return
 
 	case created:
+		log.Printf("[Worker] user_id: %s created a scheduler with task_id: %s", userID.String(), resp.ID.String())
 		// This is the first request — the task has been created and enqueued successfully.
 		// Return HTTP 202 Accepted with task details.
 		c.JSON(http.StatusAccepted, resp)

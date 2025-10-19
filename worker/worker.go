@@ -2,6 +2,7 @@ package worker
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"math/rand"
@@ -10,6 +11,7 @@ import (
 	"github.com/rizqitaufiqf/go-scheduler/config"
 	dto "github.com/rizqitaufiqf/go-scheduler/dto"
 	repo "github.com/rizqitaufiqf/go-scheduler/repository"
+	"github.com/rizqitaufiqf/go-scheduler/service"
 
 	"github.com/go-redis/redis/v8"
 	"github.com/google/uuid"
@@ -37,24 +39,30 @@ type Worker struct {
 	maxFailRefresh        int
 	backoffBaseDelay      time.Duration
 	backoffMaxDelay       time.Duration
+
+	NotificationEnabled bool
+	notificationService *service.NotificationService
 }
 
 // NewWorker creates and initializes a new Worker instance.
-func NewWorker(ctx context.Context, db *gorm.DB, redis *redis.Client, cfg *config.Config) *Worker {
+func NewWorker(ctx context.Context, db *gorm.DB, redis *redis.Client, cfg *config.Config, notificationService *service.NotificationService) *Worker {
 	w := &Worker{
 		db:           db,
 		redis:        redis,
 		ctx:          ctx,
-		pollInterval: cfg.WorkerPollInterval,
+		pollInterval: time.Duration(cfg.WorkerPollIntervalSeconds * int(time.Second)),
 		concurrency:  cfg.WorkerConcurrency,
 		sem:          make(chan struct{}, cfg.WorkerConcurrency),
 		processors:   make(map[string]TaskProcessor),
 
-		lockTTL:               cfg.LockTTL,
-		periodicReconInterval: cfg.PeriodicReconInterval,
+		lockTTL:               time.Duration(cfg.LockTTLSeconds * int(time.Second)),
+		periodicReconInterval: time.Duration(cfg.PeriodicReconIntervalSeconds * int(time.Second)),
 		maxFailRefresh:        cfg.MaxFailRefresh,
-		backoffBaseDelay:      cfg.BackoffBaseDelay,
-		backoffMaxDelay:       cfg.BackoffMaxDelay,
+		backoffBaseDelay:      time.Duration(cfg.BackoffBaseDelaySeconds * int(time.Second)),
+		backoffMaxDelay:       time.Duration(cfg.BackoffMaxDelaySeconds * int(time.Second)),
+
+		NotificationEnabled: cfg.NotificationEnabled,
+		notificationService: notificationService,
 	}
 	w.registerProcessors()
 	return w
@@ -62,7 +70,7 @@ func NewWorker(ctx context.Context, db *gorm.DB, redis *redis.Client, cfg *confi
 
 // Start begins the worker's processing loop.
 func (w *Worker) Start() {
-	log.Printf("Starting worker with concurrency=%d and poll_interval=%s...", w.concurrency, w.pollInterval)
+	log.Printf("[Worker] Starting worker with concurrency=%d and poll_interval=%s...", w.concurrency, w.pollInterval)
 	// On startup, run a one-time reconciliation to recover tasks from a potential previous crash.
 	w.reconcileTasks()
 
@@ -83,29 +91,30 @@ func (w *Worker) startPeriodicReconciliation() {
 	ticker := time.NewTicker(w.periodicReconInterval)
 	defer ticker.Stop()
 
-	log.Printf("Starting periodic reconciler to run every %v", w.periodicReconInterval)
+	log.Printf("[Worker] Starting periodic reconciler to run every %v", w.periodicReconInterval)
 
 	for range ticker.C {
 		w.reconcileMissingQueueTasks()
+
 	}
 }
 
 // reconcileMissingQueueTasks is a self-healing mechanism. It finds tasks in the database that are in a
 // queueable state ('pending', 'retrying') but are either missing from the Redis queue or have an incorrect score, and corrects them.
 func (w *Worker) reconcileMissingQueueTasks() {
-	log.Println("Running periodic check for tasks missing from queue...")
+	log.Println("[Worker] Running periodic check for tasks missing from queue...")
 
 	var tasks []dto.TaskScheduler
 	// Look for tasks in a queueable state scheduled within the last 24 hours.
 	// This window prevents checking very old, likely irrelevant tasks.
 	err := w.db.WithContext(w.ctx).
-		Where("status IN ? AND scheduled_at > ?",
+		Where("status IN ? AND scheduled_at > ? AND deleted_at IS NULL",
 			[]dto.TaskStatus{dto.StatusPending, dto.StatusRetrying},
 			time.Now().Add(-24*time.Hour),
 		).Find(&tasks).Error
 
 	if err != nil {
-		log.Printf("Periodic Reconciler: Error fetching tasks: %v", err)
+		log.Printf("[Worker] Periodic Reconciler: Error fetching tasks: %v", err)
 		return
 	}
 
@@ -118,9 +127,9 @@ func (w *Worker) reconcileMissingQueueTasks() {
 		// is out of sync with the database, we correct it by re-adding it with the proper score.
 		if err == redis.Nil || (err == nil && score != expectedScore) {
 			if err == redis.Nil {
-				log.Printf("Periodic Reconciler: Found missing task %s in queue. Re-queuing.", task.ID)
+				log.Printf("[Worker] Periodic Reconciler: Found missing task %s in queue. Re-queuing.", task.ID)
 			} else {
-				log.Printf("Periodic Reconciler: Found task %s with incorrect score. Updating score from %f to %f.", task.ID, score, expectedScore)
+				log.Printf("[Worker] Periodic Reconciler: Found task %s with incorrect score. Updating score from %f to %f.", task.ID, score, expectedScore)
 			}
 			_ = w.redis.ZAdd(w.ctx, repo.TasksQueueKey(), &redis.Z{Score: expectedScore, Member: task.ID.String()}).Err()
 		}
@@ -130,24 +139,24 @@ func (w *Worker) reconcileMissingQueueTasks() {
 // reconcileTasks is a one-time recovery process that runs on worker startup. It finds tasks that
 // may have been left in an inconsistent state (e.g., 'processing') due to a crash and requeues them.
 func (w *Worker) reconcileTasks() {
-	log.Println("Reconciling tasks...")
+	log.Println("[Worker] Reconciling tasks...")
 
 	var tasksToReconcile []dto.TaskScheduler
 	// 1. Find all tasks that are in a state that might require recovery.
 	statuses := []dto.TaskStatus{dto.StatusProcessing, dto.StatusPending, dto.StatusRetrying}
 	if err := w.db.WithContext(w.ctx).
-		Where("status IN ?", statuses).
+		Where("status IN ? AND deleted_at IS NULL", statuses).
 		Find(&tasksToReconcile).Error; err != nil {
-		log.Printf("Error finding tasks to reconcile: %v", err)
+		log.Printf("[Worker] Error finding tasks to reconcile: %v", err)
 		return
 	}
 
 	if len(tasksToReconcile) == 0 {
-		log.Println("No tasks to reconcile.")
+		log.Println("[Worker] No tasks to reconcile.")
 		return
 	}
 
-	log.Printf("Found %d tasks to reconcile. Re-queuing in Redis and updating status...", len(tasksToReconcile))
+	log.Printf("[Worker] Found %d tasks to reconcile. Re-queuing in Redis and updating status...", len(tasksToReconcile))
 	var (
 		idsToSetPending   []uuid.UUID
 		idsToResetRetries []uuid.UUID
@@ -176,7 +185,7 @@ func (w *Worker) reconcileTasks() {
 	// 4. Atomically update the status of all recovered 'processing' tasks back to 'pending'.
 	if len(idsToSetPending) > 0 {
 		if err := w.db.WithContext(w.ctx).Model(&dto.TaskScheduler{}).Where("id IN ?", idsToSetPending).Update("status", dto.StatusPending).Error; err != nil {
-			log.Printf("Error updating status for reconciled tasks: %v", err)
+			log.Printf("[Worker] Error updating status for reconciled tasks: %v", err)
 			// Do not return here, try to process the other updates
 		}
 	}
@@ -184,19 +193,19 @@ func (w *Worker) reconcileTasks() {
 	// 5. As requested by business logic, reset the retry_count for all 'retrying' tasks upon restart.
 	if len(idsToResetRetries) > 0 {
 		if err := w.db.WithContext(w.ctx).Model(&dto.TaskScheduler{}).Where("id IN ?", idsToResetRetries).Update("retry_count", 0).Error; err != nil {
-			log.Printf("Error resetting retry_count for reconciled tasks: %v", err)
+			log.Printf("[Worker] Error resetting retry_count for reconciled tasks: %v", err)
 			return
 		}
 	}
 
-	log.Println("Reconciliation complete.")
+	log.Println("[Worker] Reconciliation complete.")
 }
 
 // processDueTasks is the main polling function. It attempts to claim and dispatch due tasks from the queue.
 func (w *Worker) processDueTasks() {
 	// If the concurrency limit is already reached, don't bother trying to claim more tasks.
 	if len(w.sem) == cap(w.sem) {
-		log.Println("Concurrency limit reached, pausing claims for this tick.")
+		log.Println("[Worker] Concurrency limit reached, pausing claims for this tick.")
 		return
 	}
 
@@ -246,12 +255,12 @@ func (w *Worker) processDueTasks() {
 			break // No more due tasks
 		}
 		if err != nil {
-			log.Printf("Error running claim script: %v", err)
+			log.Printf("[Worker] Error running claim script: %v", err)
 			continue
 		}
 
 		if taskIDStr, ok := taskID.(string); ok {
-			log.Println("Claimed task:", taskIDStr)
+			log.Printf("[Worker] Claimed task: %s", taskIDStr)
 			w.sem <- struct{}{} // Acquire a semaphore slot
 			go func(id string, lockToken string) {
 				defer func() { <-w.sem }() // Release semaphore slot
@@ -314,7 +323,7 @@ func (w *Worker) executeTask(taskIDStr string, token string) {
 
 	taskID, err := uuid.Parse(taskIDStr)
 	if err != nil {
-		log.Printf("Invalid task ID '%s': %v", taskIDStr, err)
+		log.Printf("[Worker] Invalid task ID '%s': %v", taskIDStr, err)
 		return
 	}
 
@@ -333,7 +342,7 @@ func (w *Worker) executeTask(taskIDStr string, token string) {
 		First(&task).Error; err != nil {
 		tx.Rollback()
 		if err != gorm.ErrRecordNotFound {
-			log.Printf("Error selecting task %s: %v", taskID, err)
+			log.Printf("[Worker] Error selecting task %s: %v", taskID, err)
 		}
 		return
 	}
@@ -359,15 +368,15 @@ func (w *Worker) executeTask(taskIDStr string, token string) {
 	task.StartedAt = &now
 	if err := tx.Save(&task).Error; err != nil {
 		tx.Rollback()
-		log.Printf("Error marking task %s processing: %v", task.ID, err)
+		log.Printf("[Worker] Error marking task %s processing: %v", task.ID, err)
 		return
 	}
 	if err := tx.Commit().Error; err != nil {
-		log.Printf("Error committing tx for task %s processing: %v", task.ID, err)
+		log.Printf("[Worker] Error committing tx for task %s processing: %v", task.ID, err)
 		return
 	}
 
-	log.Printf("Processing task %s (%s:%s), attempt %d/%d", task.ID, task.TaskEntity.Name, task.TaskAction.Name, task.RetryCount, task.MaxRetries)
+	log.Printf("[Worker] Processing task %s (%s:%s), attempt %d/%d", task.ID, task.TaskEntity.Name, task.TaskAction.Name, task.RetryCount, task.MaxRetries)
 
 	time.Sleep(10 * time.Second)
 	// 4. Execute the actual task logic. This is done outside the database transaction.
@@ -387,9 +396,41 @@ func (w *Worker) executeTask(taskIDStr string, token string) {
 
 			task.Status = dto.StatusFailed
 			if err := w.db.WithContext(w.ctx).Save(&task).Error; err != nil {
-				log.Printf("Error saving failed task %s: %v", task.ID, err)
+				log.Printf("[Worker] Error saving failed task %s: %v", task.ID, err)
 			}
-			log.Printf("Task %s failed permanently after %d attempts: %v", task.ID, task.RetryCount, procErr)
+			log.Printf("[Worker] Task %s failed permanently after %d attempts: %v", task.ID, task.RetryCount, procErr)
+
+			// Send a notification for the permanent failure.
+			if w.NotificationEnabled && w.notificationService != nil && task.CreatedBy.Valid {
+				go func(taskID uuid.UUID, createdBy uuid.UUID, status dto.TaskStatus, entityName, actionName string) {
+					notifCtx, cancel := context.WithTimeout(w.ctx, 5*time.Second)
+					defer cancel()
+
+					// Worker now constructs the notification object itself
+					title := fmt.Sprintf("Task %s", status)
+					message := fmt.Sprintf("Task %s - %s is now %s", entityName, actionName, status)
+					metadata, _ := json.Marshal(map[string]interface{}{
+						"status": string(status),
+						"entity": entityName,
+						"action": actionName,
+					})
+
+					notification := &dto.Notification{
+						UserID:   createdBy.String(),
+						TaskID:   taskID.String(),
+						Title:    title,
+						Message:  message,
+						Type:     "task_update",
+						Metadata: metadata,
+					}
+
+					// Call the generic CreateAndSend function
+					err := w.notificationService.CreateAndSend(notifCtx, notification)
+					if err != nil {
+						log.Printf("[Worker] Failed to send 'failed' notification for task %s: %v", taskID, err)
+					}
+				}(task.ID, task.CreatedBy.UUID, task.Status, task.TaskEntity.Name, task.TaskAction.Name)
+			}
 			return
 		}
 
@@ -408,14 +449,14 @@ func (w *Worker) executeTask(taskIDStr string, token string) {
 		task.LastErrorAt = &now
 		task.Result = procErr.Error()
 		errMsg := procErr.Error()
-		if len(errMsg) > 2000 {
-			errMsg = errMsg[:2000]
-		}
+		// if len(errMsg) > 2000 {
+		// 	errMsg = errMsg[:2000]
+		// }
 		task.Result = errMsg
 
 		// Persist the 'retrying' state to the database BEFORE re-adding it to the Redis queue.
 		if err := w.db.WithContext(w.ctx).Save(&task).Error; err != nil {
-			log.Printf("Error saving retry schedule for task %s: %v", task.ID, err)
+			log.Printf("[Worker] Error saving retry schedule for task %s: %v", task.ID, err)
 			return
 		}
 
@@ -424,12 +465,12 @@ func (w *Worker) executeTask(taskIDStr string, token string) {
 			Score:  float64(newScheduledAt.Unix()),
 			Member: task.ID.String(),
 		}).Err(); err != nil {
-			log.Printf("CRITICAL: Failed to re-queue task %s for retry: %v", task.ID, err)
+			log.Printf("[Worker] CRITICAL: Failed to re-queue task %s for retry: %v", task.ID, err)
 			// This is a critical but recoverable error. The task is in the DB as 'retrying' but not in the queue.
 			// The reconcile process on next startup will fix this, but it's worth logging as critical.
 		}
 
-		log.Printf("Task %s failed, re-queued for retry in %v. Error: %v", task.ID, totalDelay.Round(time.Second), procErr)
+		log.Printf("[Worker] Task %s failed, re-queued for retry in %v. Error: %v", task.ID, totalDelay.Round(time.Second), procErr)
 		return
 	}
 
@@ -439,10 +480,45 @@ func (w *Worker) executeTask(taskIDStr string, token string) {
 	task.Status = dto.StatusCompleted
 	task.Result = "Success"
 	if err := w.db.WithContext(w.ctx).Save(&task).Error; err != nil {
-		log.Printf("Error saving completed status for task %s: %v", task.ID, err)
+		log.Printf("[Worker] Error saving completed status for task %s: %v", task.ID, err)
 		return
 	}
-	log.Printf("Task %s completed successfully", task.ID)
+
+	if w.NotificationEnabled && w.notificationService != nil {
+		// Send a notification for the successful completion.
+		if task.CreatedBy.Valid {
+			// Pass required values as arguments to the goroutine to avoid closure issues.
+			go func(taskID uuid.UUID, createdBy uuid.UUID, status dto.TaskStatus, entityName, actionName string) {
+				notifCtx, cancel := context.WithTimeout(w.ctx, 5*time.Second)
+				defer cancel()
+
+				// Worker constructs the notification object
+				title := fmt.Sprintf("Task %s", status)
+				message := fmt.Sprintf("Task %s - %s is now %s", entityName, actionName, status)
+				metadata, _ := json.Marshal(map[string]interface{}{
+					"status": string(status),
+					"entity": entityName,
+					"action": actionName,
+				})
+
+				notification := &dto.Notification{
+					UserID:   createdBy.String(),
+					TaskID:   taskID.String(),
+					Title:    title,
+					Message:  message,
+					Type:     "task_update",
+					Metadata: metadata,
+				}
+
+				// Call the generic CreateAndSend function
+				if err := w.notificationService.CreateAndSend(notifCtx, notification); err != nil {
+					log.Printf("[Worker] Failed to send 'completed' notification for task %s: %v", taskID, err)
+				}
+
+			}(task.ID, task.CreatedBy.UUID, task.Status, task.TaskEntity.Name, task.TaskAction.Name)
+		}
+	}
+	log.Printf("[Worker] Task %s completed successfully", task.ID)
 }
 
 // getProcessorKey creates a consistent key for the processors map.

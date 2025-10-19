@@ -7,9 +7,37 @@ services:
     ports:
       - "8080:8080"
     environment:
-      - REDIS_URL=${REDIS_ADDR}
-      - DATABASE_URL=postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@{POSTGRES_HOST}:{POSTGRES_PORT}/${POSTGRES_DB}
-      - TZ=${TZ:-UTC}
+      # Database
+      POSTGRES_USER: ${POSTGRES_USER:-user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-password}
+      POSTGRES_DB: ${POSTGRES_DB:-scheduler_db}
+      POSTGRES_HOST: ${POSTGRES_HOST:-postgresql}
+      POSTGRES_PORT: ${POSTGRES_PORT:-5432}
+      # Redis
+      REDIS_ADDR: ${REDIS_ADDR:-redis:6379}
+      # Timezone
+      TZ: ${TZ:-Asia/Jakarta}
+      # Worker Configuration
+      WORKER_CONCURRENCY: ${WORKER_CONCURRENCY:-10}
+      WORKER_POLL_INTERVAL_SECONDS: ${WORKER_POLL_INTERVAL_SECONDS:-10}
+      LOCK_TTL_SECONDS: ${LOCK_TTL_SECONDS:-300}
+      PERIODIC_RECON_INTERVAL_SECONDS: ${PERIODIC_RECON_INTERVAL_SECONDS:-300}
+      BACKOFF_BASE_DELAY_SECONDS: ${BACKOFF_BASE_DELAY_SECONDS:-5}
+      BACKOFF_MAX_DELAY_SECONDS: ${BACKOFF_MAX_DELAY_SECONDS:-300}
+      # Notification System
+      NOTIFICATION_ENABLED: ${NOTIFICATION_ENABLED:-true}
+      NOTIFICATION_REDIS_CHANNEL: ${NOTIFICATION_REDIS_CHANNEL:-notification-dev}
+      NOTIFICATION_RETENTION_DAYS: ${NOTIFICATION_RETENTION_DAYS:-30}
+      NOTIFICATION_USE_POSTGRES_SESSION: ${NOTIFICATION_USE_POSTGRES_SESSION:-false}
+      # JWT
+      JWT_SECRET: ${JWT_SECRET:-change-this-secret-key}
+      JWT_EXPIRY_HOURS: ${JWT_EXPIRY_HOURS:-24}
+      # WebSocket
+      WS_READ_BUFFER_SIZE: ${WS_READ_BUFFER_SIZE:-1024}
+      WS_WRITE_BUFFER_SIZE: ${WS_WRITE_BUFFER_SIZE:-1024}
+      WS_PING_INTERVAL_SECONDS: ${WS_PING_INTERVAL_SECONDS:-30}
+      WS_PONG_TIMEOUT_SECONDS: ${WS_PONG_TIMEOUT_SECONDS:-60}
+      WS_MAX_MESSAGE_SIZE: ${WS_MAX_MESSAGE_SIZE:-512}
     depends_on:
       - postgresql
       - redis
@@ -29,6 +57,11 @@ services:
     # In a real production setup, you might not expose the DB port publicly
     # ports:
     #   - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-user}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
   redis:
     image: redis:6-alpine
@@ -37,6 +70,11 @@ services:
     # You also might not expose the Redis port publicly
     # ports:
     #   - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
 volumes:
   postgres-data:

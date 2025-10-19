@@ -95,7 +95,7 @@ func (r *Scheduler) FindTasks(status string) ([]dto.TaskResponse, error) {
 	// Build a query that joins tables and selects specific fields for an efficient response,
 	// avoiding the N+1 problem of a simple Preload.
 	query := r.db.WithContext(r.ctx).Model(&dto.TaskScheduler{}).
-		Select("task_schedulers.id, task_schedulers.payload, task_schedulers.scheduled_at, task_schedulers.priority, task_schedulers.retry_count, task_schedulers.max_retries, task_schedulers.status, task_schedulers.result, task_schedulers.started_at, task_schedulers.finished_at, task_schedulers.last_error_at, task_schedulers.created_at, task_schedulers.updated_at, te.name as task_entity_name, ta.name as task_action_name").
+		Select("task_schedulers.id, task_schedulers.payload, task_schedulers.scheduled_at, task_schedulers.priority, task_schedulers.retry_count, task_schedulers.max_retries, task_schedulers.status, task_schedulers.result, task_schedulers.started_at, task_schedulers.finished_at, task_schedulers.last_error_at, task_schedulers.created_at, task_schedulers.created_by, task_schedulers.updated_at, te.name as task_entity_name, ta.name as task_action_name").
 		Joins("JOIN public.task_entities te ON te.id = task_schedulers.task_entity_id").
 		Joins("JOIN public.task_actions ta ON ta.id = task_schedulers.task_action_id").
 		Order("task_schedulers.created_at desc")
@@ -117,7 +117,7 @@ func (r *Scheduler) FindTaskByID(taskID uuid.UUID) (*dto.TaskResponse, error) {
 
 	// Use the same efficient join query as FindTasks, but filter by a single ID.
 	query := r.db.WithContext(r.ctx).Model(&dto.TaskScheduler{}).
-		Select("task_schedulers.id, task_schedulers.payload, task_schedulers.scheduled_at, task_schedulers.priority, task_schedulers.retry_count, task_schedulers.max_retries, task_schedulers.status, task_schedulers.result, task_schedulers.started_at, task_schedulers.finished_at, task_schedulers.last_error_at, task_schedulers.created_at, task_schedulers.updated_at, te.name as task_entity_name, ta.name as task_action_name").
+		Select("task_schedulers.id, task_schedulers.payload, task_schedulers.scheduled_at, task_schedulers.priority, task_schedulers.retry_count, task_schedulers.max_retries, task_schedulers.status, task_schedulers.result, task_schedulers.started_at, task_schedulers.finished_at, task_schedulers.last_error_at, task_schedulers.created_at, task_schedulers.created_by, task_schedulers.updated_at, te.name as task_entity_name, ta.name as task_action_name").
 		Joins("JOIN public.task_entities te ON te.id = task_schedulers.task_entity_id").
 		Joins("JOIN public.task_actions ta ON ta.id = task_schedulers.task_action_id").
 		Where("task_schedulers.id = ?", taskID)

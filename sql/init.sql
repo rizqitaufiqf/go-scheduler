@@ -89,6 +89,44 @@ CREATE TABLE IF NOT EXISTS public.products (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+-- ======================================
+-- 6) Notification System Tables
+-- ======================================
+
+-- Stores user sessions for tracking notification read status across devices.
+CREATE TABLE IF NOT EXISTS public.sessions (
+    id VARCHAR(255) PRIMARY KEY,
+    user_id VARCHAR(255) NOT NULL,
+    device_info TEXT,
+    ip_address VARCHAR(100),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    last_active_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    expires_at TIMESTAMPTZ
+);
+
+-- Stores the notifications generated for users.
+CREATE TABLE IF NOT EXISTS public.notifications (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    user_id VARCHAR(255) NOT NULL,
+    task_id UUID NOT NULL REFERENCES public.task_schedulers(id) ON DELETE CASCADE,
+    title TEXT NOT NULL,
+    message TEXT NOT NULL,
+    type VARCHAR(50) DEFAULT 'task_update',
+    metadata JSONB,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    expires_at TIMESTAMPTZ
+);
+
+-- Tracks which notifications have been read in which session.
+CREATE TABLE IF NOT EXISTS public.notification_read_statuses (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    notification_id UUID NOT NULL REFERENCES public.notifications(id) ON DELETE CASCADE,
+    user_id VARCHAR(255) NOT NULL,
+    read_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    -- A notification can be marked as read only once for a given user.
+    CONSTRAINT uq_read_status_user UNIQUE (notification_id, user_id)
+);
+
 -- ===================================================================
 -- 5) Indexes
 -- ===================================================================
@@ -102,6 +140,15 @@ CREATE INDEX IF NOT EXISTS r_idx_sch_tasks_status ON public.task_schedulers (sta
 CREATE INDEX IF NOT EXISTS r_idx_sch_tasks_scheduled_pending ON public.task_schedulers (scheduled_at) WHERE deleted_at IS NULL AND status = 'pending';
 CREATE INDEX IF NOT EXISTS r_idx_sch_tasks_scheduled_retrying ON public.task_schedulers (scheduled_at) WHERE deleted_at IS NULL AND status = 'retrying';
 
+-- Indexes for Notification System
+CREATE INDEX IF NOT EXISTS idx_sessions_user_id ON public.sessions (user_id);
+CREATE INDEX IF NOT EXISTS idx_sessions_expires_at ON public.sessions (expires_at);
+CREATE INDEX IF NOT EXISTS idx_notifications_user_id ON public.notifications (user_id);
+CREATE INDEX IF NOT EXISTS idx_notifications_task_id ON public.notifications (task_id);
+CREATE INDEX IF NOT EXISTS idx_notifications_expires_at ON public.notifications (expires_at);
+CREATE INDEX IF NOT EXISTS idx_read_statuses_user_notification ON public.notification_read_statuses (user_id, notification_id);
+
+
 -- ===================================================================
 -- 6) Seed Data
 -- ===================================================================
@@ -111,25 +158,35 @@ INSERT INTO public.task_actions (name, description) VALUES ('CREATE', 'Task to c
 INSERT INTO public.task_actions (name, description) VALUES ('UPDATE', 'Task to update an existing record') ON CONFLICT (name) DO NOTHING;
 INSERT INTO public.task_actions (name, description) VALUES ('DELETE', 'Task to delete a record') ON CONFLICT (name) DO NOTHING;
 
--- Add a sample task for testing
-INSERT INTO public.task_schedulers (task_entity_id, task_action_id, payload, scheduled_at)
+-- Insert sample pending task for testing
+INSERT INTO public.task_schedulers (task_entity_id, task_action_id, created_by, payload, scheduled_at, priority)
 SELECT
     (SELECT id FROM public.task_entities WHERE name = 'PRODUCT'),
     (SELECT id FROM public.task_actions WHERE name = 'CREATE'),
-    '{"name": "A Pending Product", "price": 99.99, "stock": 10}',
-    NOW() + INTERVAL '2 minutes'
+    '00000000-0000-0000-0000-000000000001'::UUID, -- admin user
+    '{"name": "Sample Pending Product", "price": 99.99, "stock": 10}'::JSONB,
+    NOW() + INTERVAL '2 minutes',
+    10
 WHERE
     EXISTS (SELECT 1 FROM public.task_entities WHERE name = 'PRODUCT') AND
-    EXISTS (SELECT 1 FROM public.task_actions WHERE name = 'CREATE');
+    EXISTS (SELECT 1 FROM public.task_actions WHERE name = 'CREATE')
+ON CONFLICT DO NOTHING;
 
--- Add a sample PAUSED task for testing the resume endpoint
-INSERT INTO public.task_schedulers (task_entity_id, task_action_id, payload, scheduled_at, status)
+-- Insert sample paused task for testing resume endpoint
+INSERT INTO public.task_schedulers (task_entity_id, task_action_id, created_by, payload, scheduled_at, status, priority)
 SELECT
     (SELECT id FROM public.task_entities WHERE name = 'PRODUCT'),
     (SELECT id FROM public.task_actions WHERE name = 'UPDATE'),
-    jsonb_build_object('id', uuid_generate_v4(), 'name', 'A Paused Update Task', 'price', 150.00),
-    NOW() + INTERVAL '4 minutes',
-    'paused'
+    '00000000-0000-0000-0000-000000000002'::UUID, -- test user
+    jsonb_build_object(
+        'id', uuid_generate_v4(), 
+        'name', 'Paused Update Task', 
+        'price', 150.00
+    ),
+    NOW() + INTERVAL '3 minutes',
+    'paused',
+    5
 WHERE
     EXISTS (SELECT 1 FROM public.task_entities WHERE name = 'PRODUCT') AND
-    EXISTS (SELECT 1 FROM public.task_actions WHERE name = 'UPDATE');
+    EXISTS (SELECT 1 FROM public.task_actions WHERE name = 'UPDATE')
+ON CONFLICT DO NOTHING;

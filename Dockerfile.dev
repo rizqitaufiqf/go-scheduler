@@ -1,5 +1,5 @@
 # Use the full Go image because we need the compiler and tooling
-FROM golang:1.24.1-alpine
+FROM golang:1.25-alpine
 
 WORKDIR /app
 

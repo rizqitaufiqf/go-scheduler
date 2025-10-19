@@ -1,0 +1,695 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Real-time Notifications Demo</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }
+        
+        .container {
+            max-width: 800px;
+            margin: 0 auto;
+        }
+        
+        .header {
+            background: white;
+            border-radius: 12px;
+            padding: 20px;
+            margin-bottom: 20px;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+        }
+        
+        .header h1 {
+            color: #333;
+            margin-bottom: 10px;
+        }
+        
+        .connection-status {
+            display: inline-block;
+            padding: 6px 12px;
+            border-radius: 20px;
+            font-size: 14px;
+            font-weight: 600;
+        }
+        
+        .status-connected {
+            background: #10b981;
+            color: white;
+        }
+        
+        .status-disconnected {
+            background: #ef4444;
+            color: white;
+        }
+        
+        .status-connecting {
+            background: #f59e0b;
+            color: white;
+        }
+        
+        .auth-form {
+            background: white;
+            border-radius: 12px;
+            padding: 20px;
+            margin-bottom: 20px;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+        }
+        
+        .form-group {
+            margin-bottom: 15px;
+        }
+        
+        .form-group label {
+            display: block;
+            margin-bottom: 5px;
+            font-weight: 600;
+            color: #333;
+        }
+        
+        .form-group input {
+            width: 100%;
+            padding: 10px;
+            border: 2px solid #e5e7eb;
+            border-radius: 6px;
+            font-size: 14px;
+        }
+        
+        .form-group input:focus {
+            outline: none;
+            border-color: #667eea;
+        }
+        
+        .btn {
+            padding: 10px 20px;
+            border: none;
+            border-radius: 6px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+        
+        .btn-primary {
+            background: #667eea;
+            color: white;
+        }
+        
+        .btn-primary:hover {
+            background: #5568d3;
+        }
+        
+        .btn-danger {
+            background: #ef4444;
+            color: white;
+        }
+        
+        .btn-danger:hover {
+            background: #dc2626;
+        }
+        
+        .notifications-container {
+            background: white;
+            border-radius: 12px;
+            padding: 20px;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+        }
+        
+        .notifications-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 20px;
+        }
+        
+        .notifications-header h2 {
+            color: #333;
+        }
+        
+        .unread-badge {
+            background: #ef4444;
+            color: white;
+            padding: 4px 12px;
+            border-radius: 12px;
+            font-size: 14px;
+            font-weight: 600;
+        }
+        
+        .notification-item {
+            padding: 15px;
+            border: 2px solid #e5e7eb;
+            border-radius: 8px;
+            margin-bottom: 10px;
+            transition: all 0.2s;
+        }
+        
+        .notification-item:hover {
+            border-color: #667eea;
+            box-shadow: 0 2px 4px rgba(102, 126, 234, 0.1);
+        }
+        
+        .notification-item.unread {
+            background: #eff6ff;
+            border-color: #3b82f6;
+        }
+        
+        .notification-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: start;
+            margin-bottom: 8px;
+        }
+        
+        .notification-title {
+            font-weight: 600;
+            color: #333;
+            font-size: 16px;
+        }
+        
+        .notification-time {
+            font-size: 12px;
+            color: #6b7280;
+        }
+        
+        .notification-message {
+            color: #4b5563;
+            margin-bottom: 10px;
+        }
+        
+        .notification-meta {
+            display: flex;
+            gap: 10px;
+            font-size: 12px;
+        }
+        
+        .meta-badge {
+            padding: 2px 8px;
+            border-radius: 4px;
+            background: #f3f4f6;
+            color: #6b7280;
+        }
+        
+        .empty-state {
+            text-align: center;
+            padding: 40px;
+            color: #9ca3af;
+        }
+        
+        .stats {
+            display: flex;
+            gap: 10px;
+            margin-top: 10px;
+        }
+        
+        .stat-item {
+            flex: 1;
+            background: #f9fafb;
+            padding: 10px;
+            border-radius: 6px;
+            text-align: center;
+        }
+        
+        .stat-label {
+            font-size: 12px;
+            color: #6b7280;
+            margin-bottom: 4px;
+        }
+        
+        .stat-value {
+            font-size: 24px;
+            font-weight: 700;
+            color: #333;
+        }
+
+        .notification-footer {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-top: 10px;
+        }
+
+        .btn-mark-read {
+            background: transparent;
+            border: 1px solid #667eea;
+            color: #667eea;
+            padding: 4px 10px;
+            font-size: 12px;
+            font-weight: 600;
+            border-radius: 4px;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+        .btn-mark-read:hover { background: #eff6ff; }
+
+        .login-status {
+            margin-top: 10px;
+            font-size: 14px;
+            font-weight: 500;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>Real-time Notifications</h1>
+            <span class="connection-status status-disconnected" id="status">Disconnected</span>
+            
+            <div class="stats">
+                <div class="stat-item">
+                    <div class="stat-label">Session ID</div>
+                    <div class="stat-value" id="sessionId" style="font-size: 12px; word-break: break-all;">-</div>
+                </div>
+                <div class="stat-item">
+                    <div class="stat-label">Received</div>
+                    <div class="stat-value" id="receivedCount">0</div>
+                </div>
+            </div>
+        </div>
+        
+        <div class="auth-form" id="loginForm">
+            <h3 style="margin-bottom: 15px; color: #333;">1. Login to Get Token</h3>
+            <div class="form-group">
+                <label for="userId">User ID (UUID)</label>
+                <input type="text" id="userId" placeholder="e.g., a8a6c4c4-8a8a-4a8a-8a8a-8a8a8a8a8a8a" value="00000000-0000-0000-0000-000000000001">
+            </div>
+            <button class="btn btn-primary" onclick="login()">Login & Get Token</button> &nbsp;
+            <button class="btn btn-danger" onclick="logout()">Logout</button>
+            <p class="login-status" id="loginStatus"></p>
+        </div>
+
+        <div class="auth-form" id="authForm">
+            <h3 style="margin-bottom: 15px; color: #333;">2. Connect to WebSocket</h3>
+            <div class="form-group">
+                <label>WebSocket URL</label>
+                <input type="text" id="wsUrl" value="ws://localhost:8080/ws/notifications" placeholder="ws://localhost:8080/ws/notifications">
+            </div>
+            <div class="form-group">
+                <label>JWT Token</label>
+                <input type="text" id="jwtToken" placeholder="Click 'Login & Get Token' above to populate this">
+            </div>
+            <button id="connectBtn" class="btn btn-primary" onclick="connect()">Connect</button> &nbsp;
+            <button id="disconnectBtn" class="btn btn-danger" onclick="disconnect()" disabled>Disconnect</button>
+        </div>
+        
+        <div class="notifications-container">
+            <div class="notifications-header">
+                <h2>Notifications</h2>
+                <span class="unread-badge" id="unreadBadge">0 unread</span>
+            </div>
+            
+            <div id="notificationsList">
+                <div class="empty-state">
+                    <p>No notifications yet. Connect to start receiving updates.</p>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        class NotificationClient {
+            constructor() {
+                this.ws = null;
+                this.notifications = [];
+                this.receivedCount = 0;
+                this.reconnectAttempts = 0;
+                this.maxReconnectAttempts = 5;
+                this.reconnectDelay = 3000;
+            }
+            
+            connect(url, token) {
+                this.updateStatus('connecting', 'Connecting...');
+                
+                const wsUrl = `${url}?token=${encodeURIComponent(token)}`;
+                this.ws = new WebSocket(wsUrl);
+                
+                this.ws.onopen = () => {
+                    console.log('WebSocket connected');
+                    this.updateStatus('connected', 'Connected');
+                    this.reconnectAttempts = 0;
+                };
+                
+                this.ws.onmessage = (event) => {
+                    const message = JSON.parse(event.data);
+                    this.handleMessage(message);
+                };
+                
+                this.ws.onerror = (error) => {
+                    console.error('WebSocket error:', error);
+                    this.updateStatus('disconnected', 'Error');
+                };
+                
+                this.ws.onclose = () => {
+                    console.log('WebSocket closed');
+                    this.updateStatus('disconnected', 'Disconnected');
+                    this.attemptReconnect(url, token);
+                };
+            }
+            
+            handleMessage(message) {
+                console.log('Received message:', message);
+                
+                switch (message.type) {
+                    case 'auth_success':
+                        console.log('Authentication successful');
+                        document.getElementById('sessionId').textContent = message.data.session_id;
+                        this.fetchInitialNotifications(); // Fetch existing notifications
+                        break;
+                        
+                    case 'notification':
+                        this.handleNotification(message.data.notification);
+                        break;
+                        
+                    case 'pong':
+                        console.log('Pong received');
+                        break;
+
+                    case 'notification_read':
+                        this.handleReadUpdate(message.data);
+                        break;
+                        
+                    case 'error':
+                        console.error('Error from server:', message.data);
+                        break;
+                }
+            }
+
+            async fetchInitialNotifications() {
+                console.log('Fetching initial notifications...');
+                const token = document.getElementById('jwtToken').value;
+                if (!token) return;
+
+                try {
+                    const response = await fetch('http://localhost:8080/api/v1/notifications?limit=50', {
+                        headers: { 'Authorization': `Bearer ${token}` }
+                    });
+
+                    if (!response.ok) {
+                        const data = await response.json();
+                        throw new Error(data.error || 'Failed to fetch notifications');
+                    }
+
+                    const data = await response.json();
+                    if (data && data.notifications && data.notifications.length > 0) {
+                        // Reverse to show oldest first, then new ones will be unshifted to the top
+                        this.notifications = data.notifications.reverse();
+                        this.renderNotifications();
+                    } else {
+                        this.renderNotifications(); // Render empty state if data or notifications are null/empty
+                    }
+                    const count = (data && data.notifications) ? data.notifications.length : 0;
+                    console.log(`Fetched and rendered ${count} notifications.`);
+
+                } catch (error) {
+                    console.error('Error fetching initial notifications:', error);
+                }
+            }
+            
+            handleNotification(data) {
+                // De-duplication: Check if the notification already exists in the list.
+                const exists = this.notifications.some(n => n.notification.id === data.notification.id);
+                if (exists) {
+                    console.log(`Duplicate notification received and ignored: ${data.notification.id}`);
+                    return; // Don't process it again.
+                }
+
+                this.receivedCount++;
+                document.getElementById('receivedCount').textContent = this.receivedCount;
+                
+                this.notifications.unshift(data);
+                this.renderNotifications();
+                
+                // Browser notification
+                if (Notification.permission === 'granted') {
+                    new Notification(data.notification.title, {
+                        body: data.notification.message,
+                        icon: '🔔'
+                    });
+                }
+                
+                // Play sound (optional)
+                this.playNotificationSound();
+            }
+
+            handleReadUpdate(data) {
+                const notificationId = data.notification_id;
+                const notification = this.notifications.find(n => n.notification.id === notificationId);
+                if (notification && !notification.is_read) {
+                    notification.is_read = true;
+                    this.renderNotifications();
+                }
+            }
+            
+            renderNotifications() {
+                const container = document.getElementById('notificationsList');
+                
+                if (this.notifications.length === 0) {
+                    container.innerHTML = '<div class="empty-state"><p>No notifications yet.</p></div>';
+                    return;
+                }
+                
+                const unreadCount = this.notifications.filter(n => !n.is_read).length;
+                document.getElementById('unreadBadge').textContent = `${unreadCount} unread`;
+                
+                container.innerHTML = this.notifications.map(notif => `
+                    <div class="notification-item ${notif.is_read ? '' : 'unread'}">
+                        <div class="notification-header">
+                            <div class="notification-title">${notif.notification.title}</div>
+                            <div class="notification-time">${this.formatTime(notif.notification.created_at)}</div>
+                        </div>
+                        <div class="notification-message">${notif.notification.message}</div>
+                        <div class="notification-footer">
+                            <div class="notification-meta">
+                                <span class="meta-badge">Type: ${notif.notification.type}</span>
+                                <span class="meta-badge">Task: ${notif.notification.task_id.substring(0, 8)}...</span>
+                            </div>
+                            ${!notif.is_read ? `<button class="btn-mark-read" onclick="markAsRead('${notif.notification.id}')">Mark as Read</button>` : ''}
+                        </div>
+                    </div>
+                `).join('');
+            }
+            
+            formatTime(timestamp) {
+                const date = new Date(timestamp);
+                const now = new Date();
+                const diff = Math.floor((now - date) / 1000);
+                
+                if (diff < 60) return 'Just now';
+                if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
+                if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
+                return date.toLocaleDateString();
+            }
+            
+            updateStatus(status, text) {
+                const statusEl = document.getElementById('status');
+                const connectBtn = document.getElementById('connectBtn');
+                const disconnectBtn = document.getElementById('disconnectBtn');
+
+                statusEl.className = `connection-status status-${status}`;
+                statusEl.textContent = text;
+
+                switch (status) {
+                    case 'connected':
+                        connectBtn.disabled = true;
+                        disconnectBtn.disabled = false;
+                        break;
+                    case 'connecting':
+                        connectBtn.disabled = true;
+                        disconnectBtn.disabled = true;
+                        break;
+                    case 'disconnected':
+                    case 'error':
+                        connectBtn.disabled = false;
+                        disconnectBtn.disabled = true;
+                        break;
+                }
+            }
+            
+            attemptReconnect(url, token) {
+                if (this.reconnectAttempts < this.maxReconnectAttempts) {
+                    this.reconnectAttempts++;
+                    console.log(`Attempting to reconnect... (${this.reconnectAttempts}/${this.maxReconnectAttempts})`);
+                    setTimeout(() => this.connect(url, token), this.reconnectDelay);
+                }
+            }
+            
+            disconnect() {
+                if (this.ws) {
+                    this.ws.close();
+                    this.ws = null;
+                }
+            }
+            
+            playNotificationSound() {
+                // Create a simple beep sound
+                const audioContext = new (window.AudioContext || window.webkitAudioContext)();
+                const oscillator = audioContext.createOscillator();
+                const gainNode = audioContext.createGain();
+                
+                oscillator.connect(gainNode);
+                gainNode.connect(audioContext.destination);
+                
+                oscillator.frequency.value = 800;
+                oscillator.type = 'sine';
+                
+                gainNode.gain.setValueAtTime(0.3, audioContext.currentTime);
+                gainNode.gain.exponentialRampToValueAtTime(0.01, audioContext.currentTime + 0.1);
+                
+                oscillator.start(audioContext.currentTime);
+                oscillator.stop(audioContext.currentTime + 0.1);
+            }
+        }
+
+        const client = new NotificationClient();
+        
+        async function markAsRead(notificationId) {
+            const token = document.getElementById('jwtToken').value;
+            if (!token) {
+                alert('Cannot mark as read. JWT Token is missing.');
+                return;
+            }
+
+            try {
+                const response = await fetch('http://localhost:8080/api/v1/notifications/read', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': `Bearer ${token}`
+                    },
+                    body: JSON.stringify({ notification_ids: [notificationId] }),
+                });
+
+                if (!response.ok) {
+                    const data = await response.json();
+                    throw new Error(data.error || 'Failed to mark as read');
+                }
+
+                // Update the UI locally
+                const notification = client.notifications.find(n => n.notification.id === notificationId);
+                if (notification) {
+                    notification.is_read = true;
+                    client.renderNotifications();
+                }
+            } catch (error) {
+                console.error('Mark as read error:', error);
+                alert(`Error: ${error.message}`);
+            }
+        }
+
+        function logout() {
+            client.disconnect();
+            localStorage.removeItem('jwtToken');
+            document.getElementById('jwtToken').value = '';
+            document.getElementById('userId').value = '00000000-0000-0000-0000-000000000001';
+            document.getElementById('loginStatus').textContent = 'Logged out.';
+            document.getElementById('loginStatus').style.color = '#6b7280';
+            console.log('Logged out and token cleared.');
+        }
+
+        function parseJwt(token) {
+            const base64Url = token.split('.')[1];
+            const base64 = base64Url.replace(/-/g, '+').replace(/_/g, '/');
+            return JSON.parse(atob(base64));
+        }
+
+        function connect() {
+            const url = document.getElementById('wsUrl').value;
+            const token = document.getElementById('jwtToken').value;
+            
+            if (!token) {
+                alert('Please enter a JWT token');
+                return;
+            }
+            
+            // Request notification permission
+            if (Notification.permission === 'default') {
+                Notification.requestPermission();
+            }
+            
+            client.connect(url, token);
+        }
+
+        function getOrSetSessionId() {
+            let sessionId = localStorage.getItem('sessionId');
+            if (!sessionId) {
+                // A simple UUID v4 generator
+                sessionId = ([1e7]+-1e3+-4e3+-8e3+-1e11).replace(/[018]/g, c => (c ^ crypto.getRandomValues(new Uint8Array(1))[0] & 15 >> c / 4).toString(16));
+                localStorage.setItem('sessionId', sessionId);
+            }
+            return sessionId;
+        }
+        
+        function disconnect() {
+            client.disconnect();
+        }
+
+        // On page load, check for a stored token
+        window.addEventListener('DOMContentLoaded', () => {
+            getOrSetSessionId(); // Ensure session ID exists on page load
+
+            const storedToken = localStorage.getItem('jwtToken');
+            if (storedToken) {
+                console.log('Found stored token. Populating fields.');
+                document.getElementById('jwtToken').value = storedToken;
+                const claims = parseJwt(storedToken);
+                document.getElementById('userId').value = claims.user_id;
+                document.getElementById('loginStatus').textContent = 'Restored session from saved token.';
+
+                // Automatically try to connect since we have a token.
+                console.log('Auto-connecting with stored token...');
+                connect();
+            }
+        });
+
+        async function login() {
+            const userId = document.getElementById('userId').value;
+            const sessionId = getOrSetSessionId(); // Get the persistent session ID
+            const loginStatusEl = document.getElementById('loginStatus');
+            const jwtTokenInput = document.getElementById('jwtToken');
+
+            if (!userId) {
+                loginStatusEl.textContent = 'Please enter a User ID.';
+                loginStatusEl.style.color = '#ef4444';
+                return;
+            }
+
+            loginStatusEl.textContent = 'Logging in...';
+            loginStatusEl.style.color = '#6b7280';
+
+            try {
+                const response = await fetch('http://localhost:8080/api/v1/auth/login', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ user_id: userId, session_id: sessionId }), // Send session_id to backend
+                });
+
+                const data = await response.json();
+
+                if (!response.ok) {
+                    throw new Error(data.error || 'Login failed');
+                }
+
+                jwtTokenInput.value = data.token;
+                localStorage.setItem('jwtToken', data.token); // Save token to localStorage
+                loginStatusEl.textContent = 'Success! Token populated below.';
+                loginStatusEl.style.color = '#10b981';
+
+                connect()
+            } catch (error) {
+                console.error('Login error:', error);
+                loginStatusEl.textContent = `Error: ${error.message}`;
+                loginStatusEl.style.color = '#ef4444';
+            }
+        }
+    </script>
+</body>
+</html>
